@@ -1,0 +1,14 @@
+# fetched training text and anything else downloaded
+/.cache/
+# never commit speech data or transcripts of it
+*.wav
+*.ogg
+*.m4a
+*.mp3
+*.opus
+/eval/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
