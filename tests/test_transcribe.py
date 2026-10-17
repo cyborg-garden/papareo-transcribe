@@ -94,7 +94,11 @@ class World:
             send_local=lambda f, t, c: self.local_sent.append((f, t, c)),
             send_handle=lambda h, f, c: (self.handle_sent.append((h, f, c)), self.send_result)[1],
             platform=lambda: self.platform_,
-            bridge_available=lambda: self.bridge,
+            bridge_problem=lambda: (
+                None if self.bridge is True
+                else "protected outputs (ovenmitt) are not set up on this agent" if self.bridge is False
+                else self.bridge
+            ),
             now=lambda: datetime(2026, 10, 16, 15, 30),
             filename_for=lambda path, when: FILENAME,
         )
@@ -197,6 +201,59 @@ def test_refused_send_keeps_the_object_for_a_resend(plugin, memo):
     assert r["sent"] is False and r["handle"] == "v_0123456789ab"
     assert "DESTINATION_NOT_FOUND" in r["note"] and "ovenmitt_vault_send" in r["note"]
     assert_no_papareo_text(r, w)
+
+
+@pytest.mark.parametrize(
+    "send",
+    [
+        "raises",
+        {"error": "Tool execution failed: AttributeError: boom"},  # the harness's shape
+        {"error": {"code": "NOT_CONFIGURED", "message": "x"}},
+        None,
+    ],
+)
+def test_after_paying_the_agent_always_leaves_with_the_handle(plugin, memo, send, caplog):
+    w = World(plugin, escalate=True)
+    if send == "raises":
+        def boom(h, f, c):
+            raise RuntimeError("send tool missing")
+        deps = w.deps()
+        deps.send_handle = boom
+        with caplog.at_level(logging.DEBUG):
+            r = plugin.transcribe.run(str(memo), "auto", deps)
+    else:
+        w.send_result = send if send is not None else {}
+        with caplog.at_level(logging.DEBUG):
+            r = w.run(memo)
+    assert r["sent"] is False and r["handle"] == "v_0123456789ab" and r["papareo_charged"] is True
+    assert "ovenmitt_vault_send" in r["note"]
+    assert_no_papareo_text(r, w)
+    assert w.papareo.text not in caplog.text
+
+
+def test_bridge_that_cannot_send_stops_the_spend(plugin, memo):
+    w = World(plugin, escalate=True, bridge="sending is not configured on this agent")
+    r = w.run(memo)
+    assert w.papareo.calls == 0
+    assert "sending is not configured" in r["note"]
+
+
+def test_only_send_destinations_count(plugin, memo):
+    class ExportOnly(FakeVault):
+        def destinations(self, vault):
+            return [types.SimpleNamespace(name="signal", kind="fs")]
+
+    w = World(plugin, escalate=True, vault=ExportOnly())
+    r = w.run(memo)
+    assert w.papareo.calls == 0 and "not allowed protected files on signal" in r["note"]
+
+
+def test_any_papareo_error_still_gets_the_local_transcript(plugin, memo, caplog):
+    w = World(plugin, escalate=True, papareo=FakePapareo(error=RuntimeError("odd failure with secret-ish detail")))
+    with caplog.at_level(logging.DEBUG):
+        r = w.run(memo)
+    assert r["engine"] == "local" and r["sent"] is True and "Ask again" in r["note"]
+    assert "secret-ish" not in json.dumps(r) and "secret-ish" not in caplog.text
 
 
 def test_detector_error_escalates(plugin, memo, caplog):

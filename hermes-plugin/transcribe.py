@@ -44,7 +44,8 @@ class Deps:
     send_local: Callable[[str, str, str | None], None]  # filename, text, caption
     send_handle: Callable[[str, str, str | None], dict]  # handle, filename, caption
     platform: Callable[[], str | None]
-    bridge_available: Callable[[], bool]
+    # Why the ovenmitt bridge couldn't send in this turn, or None when it can.
+    bridge_problem: Callable[[], str | None]
     now: Callable[[], datetime]
     filename_for: Callable[[str, datetime], str]
 
@@ -68,15 +69,16 @@ def preflight(deps: Deps) -> str | None:
     """Why escalation can't safely happen right now, or None if it can."""
     if not deps.papareo.configured:
         return deps.papareo.why_not()
-    if not deps.bridge_available():
-        return "protected outputs (ovenmitt) are not set up on this agent"
+    bridge_problem = deps.bridge_problem()
+    if bridge_problem:
+        return bridge_problem
     platform = deps.platform()
     if not platform:
         return "this conversation has no chat to send a protected file to"
     try:
         vault = deps.vault()
         vault.health()
-        names = {d.name for d in vault.destinations(VAULT)}
+        names = {d.name for d in vault.destinations(VAULT) if d.kind == "send"}
     except Exception:  # noqa: BLE001 - daemon down, vault missing, socket absent
         return "the protected-output vault is not reachable"
     if platform not in names:
@@ -138,6 +140,15 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
             f"Papa Reo didn't complete ({e}), so this is the local transcript. Ask again to retry Papa Reo.",
             deps,
         )
+    except Exception as e:  # noqa: BLE001 - any other failure still gets the user the local transcript
+        # Only the type: an unexpected error's message is not ours to vouch for.
+        logger.warning("papareo_transcribe: Papa Reo failed unexpectedly: %s", type(e).__name__)
+        return _fallback(
+            local, filename,
+            "Papa Reo didn't complete (an unexpected error), so this is the local transcript. "
+            "Ask again to retry Papa Reo.",
+            deps,
+        )
 
     body = with_footer(text)
     del text
@@ -157,21 +168,48 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
     finally:
         del body
 
-    result = deps.send_handle(info.handle, filename, _caption())
-    if not result.get("sent"):
-        code = (result.get("error") or {}).get("code", "SEND_FAILED")
+    # From here on Papa Reo is paid for and the transcript is stored: whatever
+    # the send does, the agent must leave with the handle.
+    try:
+        result = deps.send_handle(info.handle, filename, _caption())
+    except Exception:  # noqa: BLE001
+        logger.exception("papareo_transcribe: the send tool raised")
+        result = {}
+    if not (isinstance(result, dict) and result.get("sent")):
+        code = _send_error_code(result)
         return {
             "sent": False,
             "engine": "papareo",
             "handle": info.handle,
             "filename": filename,
+            "papareo_charged": True,
             "note": (
                 f"The Papa Reo transcript is safe in the vault but couldn't be sent ({code}). "
-                "It can be resent with ovenmitt_vault_send once this platform is allowed."
+                f"{_RESEND_HINT.get(code, 'It can be resent with ovenmitt_vault_send.')}"
             ),
         }
     logger.info("papareo_transcribe: Papa Reo transcript sent as %s (%s)", info.handle, ",".join(reasons))
     return {"sent": True, "engine": "papareo", "handle": info.handle, "filename": filename}
+
+
+# What has to change before ovenmitt_vault_send can succeed, by refusal code.
+_RESEND_HINT = {
+    "DESTINATION_NOT_FOUND": "It can be resent with ovenmitt_vault_send once the operator allows this platform.",
+    "TARGET_MISMATCH": "It can be resent with ovenmitt_vault_send once the operator allows this platform.",
+    "NOT_CONFIGURED": "It can be resent with ovenmitt_vault_send once the operator sets up sending on this agent.",
+    "UNSUPPORTED": "This chat can't receive files; it can be resent with ovenmitt_vault_send from a chat that can.",
+    "SEND_TIMEOUT": "The file may still have arrived; check before resending with ovenmitt_vault_send.",
+}
+
+
+def _send_error_code(result: Any) -> str:
+    """The refusal code from the send tool's reply, whatever its shape: the
+    bridge's {"error": {"code": ...}}, the harness's {"error": "<text>"} when a
+    tool raised or is missing, or nothing usable at all."""
+    err = result.get("error") if isinstance(result, dict) else None
+    if isinstance(err, dict) and isinstance(err.get("code"), str) and err["code"]:
+        return err["code"]
+    return "SEND_FAILED"
 
 
 def _deliver_local(local: LocalResult, filename: str, note: str | None, deps: Deps) -> dict[str, Any]:

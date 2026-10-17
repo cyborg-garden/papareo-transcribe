@@ -24,6 +24,21 @@ sys.path.insert(0, str(ROOT / "hermes-plugin"))
 import papareo  # noqa: E402
 
 
+def _shape(value: object, depth: int = 0) -> str:
+    """A value's structure with every leaf replaced by its type (and a
+    length for strings and lists). Never a value."""
+    if depth > 3:
+        return "…"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k!r}: {_shape(v, depth + 1)}" for k, v in value.items()) + "}"
+    if isinstance(value, list):
+        inner = _shape(value[0], depth + 1) if value else ""
+        return f"list[{len(value)}]" + (f" of {inner}" if inner else "")
+    if isinstance(value, str):
+        return f"str[{len(value)}]"
+    return type(value).__name__
+
+
 class Recording(httpx.HTTPTransport):
     """Passes requests through and keeps each response's shape."""
 
@@ -36,12 +51,10 @@ class Recording(httpx.HTTPTransport):
         response.read()
         shape = f"{request.method} {request.url.path} -> HTTP {response.status_code} {response.headers.get('content-type')}"
         try:
-            body = response.json()
-            if isinstance(body, dict):
-                shape += " " + str({k: type(v).__name__ if k == "transcription" else v
-                                    for k, v in body.items() if k not in {"log", "metadata"}})
-                if "transcription" in body:
-                    shape += f" (transcription: {len(body['transcription'] or '')} chars)"
+            # Key names and value types only, never values: until the live
+            # response is known, any key could be the one holding transcript
+            # text, and this output may land in a terminal an LLM reads.
+            shape += " " + _shape(response.json())
         except ValueError:
             shape += f" ({len(response.content)} bytes, not JSON)"
         self.seen.append(shape)

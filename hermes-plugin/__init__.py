@@ -23,6 +23,7 @@ _POPPED_KEY: str | None = os.environ.pop("PAPAREO_API_KEY", None) or globals().g
 
 import json  # noqa: E402
 import logging  # noqa: E402
+import sys  # noqa: E402
 from typing import Any  # noqa: E402
 
 from . import deliver, detector, transcribe  # noqa: E402
@@ -59,13 +60,35 @@ SCHEMA: dict[str, Any] = {
 }
 
 
-def _bridge_available() -> bool:
+NOT_SET_UP = "protected outputs (ovenmitt) are not set up on this agent"
+
+
+def _bridge_problem() -> str | None:
+    """Why the ovenmitt bridge couldn't send in this turn, or None when it can.
+
+    Asked before any money is spent. The bridge's own send_readiness() knows
+    whether it holds a credential and whether this turn is bound to a chat
+    whose adapter can take a file; its tool merely existing proves neither.
+    """
     try:
         from tools.registry import registry  # type: ignore[import-not-found]
 
-        return registry.get_entry(SEND_TOOL) is not None
+        if registry.get_entry(SEND_TOOL) is None:
+            return NOT_SET_UP
     except Exception:  # noqa: BLE001
-        return False
+        return NOT_SET_UP
+    bridge = next(
+        (m for name, m in list(sys.modules.items())
+         if name.rsplit(".", 1)[-1] == "ovenmitt_bridge" and hasattr(m, "send_readiness")),
+        None,
+    )
+    if bridge is None:
+        return "the ovenmitt bridge can't confirm it can send (it needs version 0.2.0 or later)"
+    try:
+        return bridge.send_readiness()
+    except Exception:  # noqa: BLE001
+        logger.exception("papareo_transcribe: the bridge's send_readiness failed")
+        return "the ovenmitt bridge couldn't check this chat"
 
 
 def register(ctx: Any) -> None:
@@ -100,7 +123,7 @@ def register(ctx: Any) -> None:
         send_local=deliver.send_local,
         send_handle=send_handle,
         platform=deliver.session_platform,
-        bridge_available=_bridge_available,
+        bridge_problem=_bridge_problem,
         now=deliver.now,
         filename_for=deliver.filename_for,
     )
