@@ -8,20 +8,26 @@ original audio to Papa Reo, puts the result in the ovenmitt vault and has
 the ovenmitt bridge send it here. Papa Reo text never reaches the model.
 
 The Papa Reo key arrives in the process environment (a sealed key: compose
-``environment:``, never ``.env``) and is popped into this module's closure
-at ``register()``, so terminal children never inherit it.
+``environment:``, never ``.env``) and is popped out of it as this module's
+very first statement, before any import that could fail, so terminal
+children never inherit it even when the plugin doesn't load.
 """
 
 from __future__ import annotations
 
-import json
-import logging
 import os
-from typing import Any
 
-from . import deliver, detector, transcribe
-from .local import LocalWhisper
-from .papareo import PapareoClient
+# First, before anything that can raise. On importlib.reload the module dict
+# survives, so a second import keeps the value the first one popped.
+_POPPED_KEY: str | None = os.environ.pop("PAPAREO_API_KEY", None) or globals().get("_POPPED_KEY")
+
+import json  # noqa: E402
+import logging  # noqa: E402
+from typing import Any  # noqa: E402
+
+from . import deliver, detector, transcribe  # noqa: E402
+from .local import LocalWhisper  # noqa: E402
+from .papareo import PapareoClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +70,9 @@ def _bridge_available() -> bool:
 
 def register(ctx: Any) -> None:
     """Hermes plugin entry point."""
-    papareo = PapareoClient(os.environ.pop(KEY_ENV, None) or None)
+    global _POPPED_KEY
+    _POPPED_KEY = os.environ.pop(KEY_ENV, None) or _POPPED_KEY
+    papareo = PapareoClient(_POPPED_KEY)
     socket_path = os.environ.get(SOCKET_ENV) or DEFAULT_SOCKET
     whisper = LocalWhisper()
     model = detector.TrigramModel.load()
