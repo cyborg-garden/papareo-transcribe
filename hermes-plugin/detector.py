@@ -12,7 +12,7 @@ any one is enough:
 The trigram score exists for mixed speech, where whisper picks English and
 drops the macrons. It is one number over the whole transcript (no sliding
 windows), and its threshold is tuned on real recordings (scripts/tune.py).
-Replace this whole module if something better becomes available.
+Replace this whole module when something better becomes available.
 """
 
 from __future__ import annotations

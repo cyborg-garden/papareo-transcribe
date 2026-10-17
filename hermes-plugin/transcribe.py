@@ -26,7 +26,10 @@ from .papareo import NotConfigured, PapareoClient, PapareoError, with_footer
 
 logger = logging.getLogger(__name__)
 
-VAULT = "private"
+# Swarm Map's Transcription card sets this vault up; transcripts go nowhere else.
+VAULT = "papareo"
+# The operator's export folder for this vault (an `fs` destination), if any.
+FOLDER = "folder"
 ENGINES = ("auto", "papareo", "local")
 SUPPORTED = {
     ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".oga", ".opus",
@@ -168,6 +171,8 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
     finally:
         del body
 
+    _export_copy(info.handle, filename, deps)
+
     # From here on Papa Reo is paid for and the transcript is stored: whatever
     # the send does, the agent must leave with the handle.
     try:
@@ -190,6 +195,17 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
         }
     logger.info("papareo_transcribe: Papa Reo transcript sent as %s (%s)", info.handle, ",".join(reasons))
     return {"sent": True, "engine": "papareo", "handle": info.handle, "filename": filename}
+
+
+def _export_copy(handle: str, filename: str, deps: Deps) -> None:
+    """Also write the transcript to the operator's export folder, when the
+    vault has one. Best effort: the chat send is what the person asked for."""
+    try:
+        vault = deps.vault()
+        if any(d.name == FOLDER and d.kind == "fs" for d in vault.destinations(VAULT)):
+            vault.export(handle, FOLDER, filename)
+    except Exception as e:  # noqa: BLE001 - EXISTS, an unwritable folder, the daemon gone
+        logger.warning("papareo_transcribe: export to the folder failed: %s", getattr(e, "code", type(e).__name__))
 
 
 # What has to change before ovenmitt_vault_send can succeed, by refusal code.

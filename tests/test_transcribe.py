@@ -14,11 +14,14 @@ FILENAME = "transcript-20261016-1530.txt"
 
 
 class FakeVault:
-    def __init__(self, destinations=("signal",), up=True, put_fails=False):
+    def __init__(self, destinations=("signal",), up=True, put_fails=False, folder=False, export_fails=False):
         self._dest = destinations
         self._up = up
         self._put_fails = put_fails
+        self._folder = folder
+        self._export_fails = export_fails
         self.puts: list[dict] = []
+        self.exports: list[tuple] = []
 
     def health(self):
         if not self._up:
@@ -26,7 +29,13 @@ class FakeVault:
         return {"status": "ok"}
 
     def destinations(self, vault):
-        return [types.SimpleNamespace(name=n, kind="send") for n in self._dest]
+        out = [types.SimpleNamespace(name=n, kind="send") for n in self._dest]
+        return out + ([types.SimpleNamespace(name="folder", kind="fs")] if self._folder else [])
+
+    def export(self, handle, destination, filename):
+        if self._export_fails:
+            raise RuntimeError("EXISTS")
+        self.exports.append((handle, destination, filename))
 
     def put(self, body, vault, **kw):
         if self._put_fails:
@@ -132,7 +141,7 @@ def test_maori_goes_to_papareo_vault_and_bridge(plugin, memo):
     assert r == {"sent": True, "engine": "papareo", "handle": "v_0123456789ab", "filename": FILENAME}
     assert w.papareo.calls == 1
     [put] = w.vault_.puts
-    assert put["vault"] == "private"
+    assert put["vault"] == "papareo"
     assert put["name"] == FILENAME and put["labels"] == [FILENAME]
     assert put["mime"].startswith("text/plain")
     body = put["body"].decode()
@@ -293,3 +302,17 @@ def test_papareo_text_never_logged(plugin, memo, caplog):
     with caplog.at_level(logging.DEBUG):
         w.run(memo)
     assert w.papareo.text not in caplog.text
+
+
+def test_papareo_transcript_is_also_exported_to_the_folder(plugin, memo):
+    w = World(plugin, escalate=True, vault=FakeVault(folder=True))
+    r = w.run(memo)
+    assert r["sent"] is True
+    assert w.vault_.exports == [("v_0123456789ab", "folder", FILENAME)]
+
+
+def test_no_folder_no_export_and_a_failed_export_still_sends(plugin, memo):
+    w = World(plugin, escalate=True)
+    assert w.run(memo)["sent"] is True and w.vault_.exports == []
+    w = World(plugin, escalate=True, vault=FakeVault(folder=True, export_fails=True))
+    assert w.run(memo)["sent"] is True and len(w.handle_sent) == 1

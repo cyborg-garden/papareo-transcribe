@@ -39,7 +39,8 @@ Install both directories, each pinned to a tag (`git:cyborg-garden/papareo-trans
 
 ## What the agent needs
 
-- The `ovenmitt_bridge` plugin and an ovenmitt daemon, with a `send` destination named after each platform that may receive protected files (`match = "<platform>/*"`).
+- The `ovenmitt_bridge` plugin and an ovenmitt daemon with a vault named `papareo`, holding a `send` destination named after each platform that may receive transcripts (`match = "<platform>/*"`, or one chat). Swarm Map's Transcription card adds the vault.
+- Optionally, an `fs` destination named `folder` on that vault: every Papa Reo transcript is also exported there (best effort; a failed export doesn't stop the send).
 - The `ovenmitt` Python package and ffmpeg in the image.
 - `PAPAREO_API_KEY` in the gateway's environment, ideally as a compose `environment:` entry rather than in `.env`. The plugin pops it into memory at load. Without it, the agent transcribes locally only, and says so.
 - `stt.enabled: false`, so voice notes reach the agent as recordings instead of being transcribed as messages; `stt.local.model: large-v3-turbo`; about 3 GB of memory.
