@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
 
@@ -39,7 +40,10 @@ def test_register_pops_the_key_and_registers_one_tool(plugin, monkeypatch):
     assert "PAPAREO_API_KEY" not in os.environ
     [tool] = registered
     assert tool["name"] == "transcribe_recording"
-    assert set(tool["schema"]["parameters"]["properties"]) == {"path", "engine"}
+    assert set(tool["schema"]["parameters"]["properties"]) == {"path", "engine", "chosen_by_person"}
+    # The handler refuses when the agent picked the engine itself.
+    r = json.loads(tool["handler"]({"path": "/nonexistent.ogg", "engine": "local"}))
+    assert r["error"].startswith("Nothing was transcribed. Ask the person first")
     assert "k-secret-123" not in repr(tool)
 
 

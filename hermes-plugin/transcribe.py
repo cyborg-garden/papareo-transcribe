@@ -127,16 +127,18 @@ def preflight(deps: Deps) -> str | None:
 
 
 ASK_FIRST = (
-    "Ask the person first which they want, then call again with engine='local' (whisper on "
-    "this machine, free; you see the text) or engine='papareo' (Papa Reo, for te reo Māori; "
-    "a paid call; the transcript is protected and you won't see it)."
+    "Nothing was transcribed. Ask the person first, in one short question: \"Local transcript "
+    "(free), or Papa Reo (best for te reo Māori; costs a little)?\" Then call again with their "
+    "answer as engine ('local' or 'papareo') and chosen_by_person=true."
 )
 
 
-def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
+def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> dict[str, Any]:
+    """chosen_by_person: the person said which engine. The tool passes what
+    the agent claims; without it nothing runs and the agent is told to ask."""
     if engine not in ENGINES:
         return {"sent": False, "error": f"engine must be one of {', '.join(ENGINES)}"}
-    if engine == "auto" and deps.detect is None:
+    if (engine == "auto" and deps.detect is None) or (engine != "auto" and not chosen_by_person):
         return {"sent": False, "error": ASK_FIRST}
     problem = check_path(path, deps.is_audio)
     if problem:
@@ -243,7 +245,20 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
         "handle": info.handle,
         "filename": filename,
         **_shared(shared),
+        "next": NEXT_PAPAREO,
     }
+
+
+# What to do next, in every result: the skill may never have been read.
+NEXT_LOCAL = (
+    "Tell the person the transcript is attached and what made it (transcribed_by). Don't summarise, "
+    "translate, quote or save copies of it unless they ask."
+)
+NEXT_PAPAREO = (
+    "Tell the person the transcript is attached, that Papa Reo made it, and link the Kaitiakitanga "
+    "License (https://papareo.io/kaitiakitanga); the first time in this conversation, ask them to use "
+    "it within its terms. Don't repeat, summarise or save the text unless they ask."
+)
 
 
 def _shared(text: str | None) -> dict[str, Any]:
@@ -284,7 +299,13 @@ def _send_error_code(result: Any) -> str:
 
 def _deliver_local(local: LocalResult, filename: str, note: str | None, deps: Deps) -> dict[str, Any]:
     source = local_source(local)
-    out: dict[str, Any] = {"engine": "local", "transcribed_by": source, "filename": filename, "text": local.text}
+    out: dict[str, Any] = {
+        "engine": "local",
+        "transcribed_by": source,
+        "filename": filename,
+        "text": local.text,
+        "next": NEXT_LOCAL,
+    }
     if note:
         out["note"] = note
     try:
