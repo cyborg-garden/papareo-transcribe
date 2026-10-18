@@ -1,12 +1,12 @@
 """papareo_transcribe: transcripts of recordings, escalated to Papa Reo when
 they may contain te reo Māori.
 
-One tool, ``transcribe_recording(path, engine)``. It runs local whisper and
-sends the local transcript to this chat, or, when the person asks for Papa
-Reo (engine="papareo") and a safe way out exists, sends the original audio
-to Papa Reo, puts the result in the ovenmitt vault and has the ovenmitt
-bridge send it here. Papa Reo text never reaches the model. Automatic
-detection of te reo (the may_contain_mi project) is not wired in yet.
+One tool, ``transcribe_recording(path, engine)``, and the agent asks the
+person which engine first. "local" runs whisper and sends the transcript to
+this chat. "papareo", when a safe way out exists, sends the original audio
+to Papa Reo (whisper doesn't run), puts the result in the ovenmitt vault and
+has the ovenmitt bridge send it here. Papa Reo text never reaches the model.
+Automatic detection of te reo (the may_contain_mi project) is not wired in.
 
 The Papa Reo key arrives in the process environment (a sealed key: compose
 ``environment:``, never ``.env``) and is popped out of it as this module's
@@ -28,7 +28,7 @@ import sys  # noqa: E402
 from typing import Any  # noqa: E402
 
 from . import deliver, transcribe  # noqa: E402
-from .local import LocalWhisper  # noqa: E402
+from .local import LocalWhisper, probe_duration  # noqa: E402
 from .papareo import PapareoClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -44,19 +44,19 @@ SCHEMA: dict[str, Any] = {
     "name": "transcribe_recording",
     "description": (
         "Transcribe a recording (a voice note or an audio file the user sent) and send the "
-        "transcript to this chat as a .txt file. By default it is transcribed locally and you get "
-        "the text back. With engine='papareo' it goes to Papa Reo instead (te reo Māori speech "
-        "recognition, a paid call) and you get only a handle: the transcript is protected, and you "
-        "must not try to read it. engine: 'auto' (default, local for now); 'papareo' when the user "
-        "asks for Papa Reo or says it is in Māori; 'local' for a plain NZ English transcript."
+        "transcript to this chat as a .txt file. Ask the person which engine first, unless they "
+        "already said. engine='local': whisper on this machine, free, and you get the text back. "
+        "engine='papareo': Papa Reo, Te Hiku Media's speech recognition for te reo Māori, a paid "
+        "call; you get only a handle, because the transcript is protected and you must not try to "
+        "read it."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path of the recording, as the message gave it."},
-            "engine": {"type": "string", "enum": list(transcribe.ENGINES), "default": "auto"},
+            "engine": {"type": "string", "enum": ["local", "papareo"]},
         },
-        "required": ["path"],
+        "required": ["path", "engine"],
     },
 }
 
@@ -117,6 +117,7 @@ def register(ctx: Any) -> None:
 
     deps = transcribe.Deps(
         local=whisper.transcribe,
+        duration=probe_duration,
         papareo=papareo,
         vault=vault,
         send_local=deliver.send_local,
@@ -129,7 +130,7 @@ def register(ctx: Any) -> None:
 
     def handle(args: dict[str, Any], **_: Any) -> str:
         path = str(args.get("path") or "")
-        engine = str(args.get("engine") or "auto")
+        engine = str(args.get("engine") or "auto")  # missing: refused with ASK_FIRST
         return json.dumps(transcribe.run(path, engine, deps), ensure_ascii=False)
 
     ctx.register_tool(

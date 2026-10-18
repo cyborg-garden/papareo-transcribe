@@ -56,6 +56,7 @@ class FakePapareo:
 
     def transcribe(self, path, duration):
         self.calls += 1
+        self.duration = duration
         if self.error:
             raise self.error
         return self.text
@@ -74,8 +75,9 @@ class World:
         self.vault_ = vault or FakeVault()
         self.send_result = send_result or {"sent": True, "handle": "v_0123456789ab"}
         self.escalate = escalate
-        self.local_result = plugin.local.LocalResult(text=text, language=language, language_probability=0.9, duration=42.0)
+        self.local_result = plugin.local.LocalResult(text=text, language=language, language_probability=0.9, duration=42.0, model="large-v3-turbo")
         self.local_fails = local_fails
+        self.local_calls = 0
         self.detector_fails = detector_fails
         self.bridge = bridge
         self.platform_ = platform
@@ -84,6 +86,7 @@ class World:
         p = self.plugin
 
         def local(path):
+            self.local_calls += 1
             if self.local_fails:
                 raise RuntimeError("whisper fell over")
             return self.local_result
@@ -98,6 +101,7 @@ class World:
         no_detector = self.escalate is None and not self.detector_fails
         return p.transcribe.Deps(
             local=local,
+            duration=lambda path: 400.0,
             detect=None if no_detector else detect,
             papareo=self.papareo,
             vault=lambda: self.vault_,
@@ -130,22 +134,50 @@ def assert_no_papareo_text(result, world):
 
 def test_english_goes_local_and_the_agent_sees_the_text(plugin, memo):
     w = World(plugin)
-    r = w.run(memo)
-    assert r == {"engine": "local", "filename": FILENAME, "text": w.local_result.text, "sent": True}
-    assert w.local_sent == [(FILENAME, w.local_result.text, "Transcript")]
+    r = w.run(memo, engine="local")
+    src = "whisper large-v3-turbo, run locally"
+    assert r == {"engine": "local", "transcribed_by": src, "filename": FILENAME, "text": w.local_result.text, "sent": True}
+    assert w.local_sent == [
+        (FILENAME, f"{w.local_result.text}\n\nTranscribed by {src}.\n", f"Transcript ({src})")
+    ], "the file and its caption say what made it"
     assert w.papareo.calls == 0 and w.vault_.puts == [] and w.handle_sent == []
 
 
-def test_without_a_detector_auto_stays_local_even_for_te_reo(plugin, memo):
+def test_without_a_detector_the_agent_must_ask_first(plugin, memo):
     w = World(plugin, text="Kia ora, tēnā koutou katoa.", language="mi")
-    r = w.run(memo)
-    assert r["engine"] == "local" and w.papareo.calls == 0 and w.vault_.puts == []
+    r = w.run(memo)  # engine="auto"
+    assert r["sent"] is False and r["error"].startswith("Ask the person first")
+    assert w.local_calls == 0 and w.papareo.calls == 0 and w.local_sent == []
+
+
+def test_papareo_never_runs_whisper(plugin, memo):
+    w = World(plugin)
+    r = w.run(memo, engine="papareo")
+    assert r["sent"] is True and r["engine"] == "papareo"
+    assert w.local_calls == 0 and w.local_sent == []
+    assert w.papareo.duration == 400.0, "length comes from the probe, for the long endpoint"
+
+
+def test_papareo_failure_without_whisper_offers_local_instead(plugin, memo):
+    w = World(plugin, papareo=FakePapareo(error=plugin.papareo.PapareoError("Papa Reo timed out")))
+    r = w.run(memo, engine="papareo")
+    assert r["sent"] is False and r["engine"] == "none"
+    assert "engine='local'" in r["note"] and "Ask again to retry Papa Reo" in r["note"]
+    assert w.local_calls == 0 and w.local_sent == [] and w.papareo.calls == 1
+
+
+def test_papareo_preflight_failure_spends_nothing_and_runs_nothing(plugin, memo):
+    w = World(plugin, platform="discord")
+    r = w.run(memo, engine="papareo")
+    assert r["engine"] == "none" and "nothing was spent" in r["note"]
+    assert w.papareo.calls == 0 and w.local_calls == 0
 
 
 def test_flagged_recording_goes_to_papareo_vault_and_bridge(plugin, memo):
     w = World(plugin, text="Kia ora, tēnā koutou katoa.", language="en", escalate=True)
     r = w.run(memo)
-    assert r == {"sent": True, "engine": "papareo", "handle": "v_0123456789ab", "filename": FILENAME}
+    assert r == {"sent": True, "engine": "papareo", "transcribed_by": "Papa Reo, Te Hiku Media",
+                 "handle": "v_0123456789ab", "filename": FILENAME}
     assert w.papareo.calls == 1
     [put] = w.vault_.puts
     assert put["vault"] == "papareo"
@@ -155,9 +187,9 @@ def test_flagged_recording_goes_to_papareo_vault_and_bridge(plugin, memo):
     assert body.startswith(w.papareo.text)
     assert body.endswith(
         "This text transcribed by Papa Reo API. Please be sure to comply with the terms of the "
-        "Kaitiakitanga license in use of this material.\n"
+        "Kaitiakitanga license in use of this material.\n" + plugin.papareo.NOTICE + "\n"
     )
-    assert w.handle_sent == [("v_0123456789ab", FILENAME, "Transcript")]
+    assert w.handle_sent == [("v_0123456789ab", FILENAME, "Transcript (Papa Reo, Te Hiku Media)")]
     assert w.local_sent == []
     assert_no_papareo_text(r, w)
 
@@ -282,11 +314,11 @@ def test_detector_error_escalates(plugin, memo, caplog):
 
 def test_local_failure(plugin, memo):
     assert World(plugin, local_fails=True).run(memo, engine="local")["sent"] is False
-    w = World(plugin, local_fails=True)
+    w = World(plugin, local_fails=True, escalate=False)  # with a detector plugged in
     assert w.run(memo)["engine"] == "papareo", "biased to fire when there is nothing to judge"
     w2 = World(plugin, local_fails=True, papareo=FakePapareo(configured=False))
-    r = w2.run(memo)
-    assert r["sent"] is False and "local transcription failed too" in r["note"]
+    r = w2.run(memo, engine="papareo")
+    assert r["sent"] is False and "engine='local'" in r["note"]
 
 
 @pytest.mark.parametrize("name", ["missing.ogg", "notes.txt"])
