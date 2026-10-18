@@ -9,16 +9,22 @@ On this agent, a recording someone sends you is **something to transcribe**, not
 
 ## Ask first
 
-Before transcribing, ask the person which way they want it, unless they've already said. Keep it to one short question, for example:
+Before transcribing, ask the person which way they want it, unless they've already said. One short question, nothing else:
 
-> Want a local transcript (free), or Papa Reo (best for te reo Māori; it costs a little, and I won't see the text)?
+> Local transcript (free), or Papa Reo (best for te reo Māori; costs a little, and I won't see the text)?
+
+If your system instructions say you are deployed in line with the Kaitiakitanga License, drop "and I won't see the text":
+
+> Local transcript (free), or Papa Reo (best for te reo Māori; costs a little)?
+
+- **Don't comment on the file.** Voice notes often arrive as `.bin` or with no extension; that's normal and the tool handles it. Don't inspect, rename or describe the file.
+- **One recording, one question.** Don't count or bring up earlier recordings unless the person does. If they send several at once, one question can cover them all.
+- If they said it up front ("transcribe this with Papa Reo"), don't ask. Don't pick for them, and don't run both.
 
 | They say something like | engine |
 |---|---|
 | "local", "just a normal transcript", "it's English" | `local` |
 | "Papa Reo", "it's in te reo", "treat it as Māori" | `papareo` |
-
-If they said it up front ("transcribe this with Papa Reo"), don't ask again. Don't pick for them, and don't run both.
 
 ## The tool
 
