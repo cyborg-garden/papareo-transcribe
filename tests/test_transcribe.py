@@ -67,7 +67,8 @@ class World:
 
     def __init__(self, plugin, *, text="Just a quick English note about Thursday.", language="en",
                  escalate=None, papareo=None, vault=None, bridge=True, platform="signal",
-                 send_result=None, local_fails=False, detector_fails=False):
+                 send_result=None, local_fails=False, detector_fails=False, is_audio=None,
+                 compliant=False):
         self.plugin = plugin
         self.local_sent: list[tuple] = []
         self.handle_sent: list[tuple] = []
@@ -78,6 +79,8 @@ class World:
         self.local_result = plugin.local.LocalResult(text=text, language=language, language_probability=0.9, duration=42.0, model="large-v3-turbo")
         self.local_fails = local_fails
         self.local_calls = 0
+        self.is_audio = is_audio
+        self.compliant = compliant
         self.detector_fails = detector_fails
         self.bridge = bridge
         self.platform_ = platform
@@ -102,6 +105,8 @@ class World:
         return p.transcribe.Deps(
             local=local,
             duration=lambda path: 400.0,
+            is_audio=self.is_audio,
+            share_papareo_text=self.compliant,
             detect=None if no_detector else detect,
             papareo=self.papareo,
             vault=lambda: self.vault_,
@@ -355,3 +360,36 @@ def test_no_folder_no_export_and_a_failed_export_still_sends(plugin, memo):
     assert w.run(memo)["sent"] is True and w.vault_.exports == []
     w = World(plugin, escalate=True, vault=FakeVault(folder=True, export_fails=True))
     assert w.run(memo)["sent"] is True and len(w.handle_sent) == 1
+
+
+def test_unknown_extension_is_accepted_when_it_holds_audio(plugin, tmp_path):
+    p = tmp_path / "attachment-0123.bin"  # how chat platforms often save audio
+    p.write_bytes(b"RIFF" + secrets.token_bytes(64))
+    w = World(plugin, is_audio=lambda path: True)
+    assert w.run(p, engine="local")["sent"] is True
+
+
+def test_unknown_extension_without_audio_is_refused(plugin, tmp_path):
+    p = tmp_path / "attachment-0123.bin"
+    p.write_bytes(b"not audio")
+    for probe in (None, lambda path: False, lambda path: 1 / 0):
+        w = World(plugin, is_audio=probe)
+        r = w.run(p, engine="local")
+        assert r["sent"] is False and "no audio found" in r["error"] and w.local_calls == 0
+
+
+def test_declared_compliant_agent_gets_the_papareo_text(plugin, memo, caplog):
+    w = World(plugin, compliant=True)
+    with caplog.at_level(logging.DEBUG):
+        r = w.run(memo, engine="papareo")
+    assert r["sent"] is True and r["text"] == w.papareo.text and r["kaitiakitanga_compliant"] is True
+    assert w.papareo.text not in caplog.text, "never logged, even when shared"
+    [put] = w.vault_.puts
+    assert put["body"].decode().startswith(w.papareo.text), "still stored and sent as before"
+
+
+def test_not_declared_means_no_papareo_text(plugin, memo):
+    w = World(plugin)
+    r = w.run(memo, engine="papareo")
+    assert "text" not in r and "kaitiakitanga_compliant" not in r
+    assert_no_papareo_text(r, w)

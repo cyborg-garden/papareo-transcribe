@@ -61,3 +61,20 @@ def test_local_whisper_hands_the_model_decoded_samples(plugin, monkeypatch, tmp_
     assert r == plugin.local.LocalResult("kia ora", "mi", 0.8, 1.5, model="large-v3-turbo")
     assert seen["audio"] == [0.0] * 24000
     assert seen["kw"]["language"] is None, "language must be auto-detected"
+
+
+def test_has_audio_reads_content_not_the_extension(plugin, tmp_path):
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("needs ffmpeg")
+    wav = tmp_path / "a.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=1", str(wav)], check=True)
+    disguised = tmp_path / "attachment.bin"
+    disguised.write_bytes(wav.read_bytes())
+    junk = tmp_path / "notes.bin"
+    junk.write_text("hello")
+    assert plugin.local.has_audio(str(disguised)) is True
+    assert plugin.local.has_audio(str(junk)) is False
+    assert 0.9 < plugin.local.probe_duration(str(disguised)) < 1.1

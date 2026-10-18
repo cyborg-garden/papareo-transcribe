@@ -13,7 +13,10 @@ nothing is spent and the user gets the local transcript with a note.
 
 What the agent gets back: for a local transcript, the text (it is
 unprotected, so the agent may discuss it); for a Papa Reo transcript, only
-a handle. Papa Reo text never appears in a return value or a log line.
+a handle. Papa Reo text never appears in a log line, and appears in a return
+value only when the operator has declared the agent compliant with the
+Kaitiakitanga License (``Deps.share_papareo_text``: Swarm Map's
+PAPAREO_KAITIAKITANGA_COMPLIANT=1, set on the Transcription card).
 """
 
 from __future__ import annotations
@@ -68,6 +71,11 @@ class Deps:
     # Seconds of audio, for picking Papa Reo's short or long endpoint when
     # whisper didn't run (engine="papareo"). None if unknown.
     duration: Callable[[str], float | None] | None = None
+    # Whether a file with an unknown extension (.bin, none) holds audio.
+    is_audio: Callable[[str], bool] | None = None
+    # The operator declared this agent compliant with the Kaitiakitanga
+    # License, so Papa Reo text may be returned to it.
+    share_papareo_text: bool = False
     # (text, whisper language) -> Decision. None until may_contain_mi is
     # wired in; until then engine="auto" is refused (ask the person instead).
     detect: Callable[[str, str], Decision] | None = None
@@ -84,12 +92,14 @@ def _caption(source: str, note: str | None = None) -> str:
     return f"Transcript ({source}). {note}" if note else f"Transcript ({source})"
 
 
-def check_path(path: str) -> str | None:
+def check_path(path: str, is_audio: Callable[[str], bool] | None = None) -> str | None:
     p = Path(path)
     if not path or not p.is_file():
         return "no recording at that path"
-    if p.suffix.lower() not in SUPPORTED:
-        return f"unsupported audio type: {p.suffix or '(none)'}"
+    # Chat platforms often save attachments as .bin or with no extension, so
+    # an unknown extension is checked by content before it is refused.
+    if p.suffix.lower() not in SUPPORTED and not (is_audio and _safe(is_audio, path)):
+        return f"not a recording this can read ({p.suffix or 'no extension'}, and no audio found in it)"
     if p.stat().st_size > MAX_BYTES:
         return "recording is too large"
     return None
@@ -128,7 +138,7 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
         return {"sent": False, "error": f"engine must be one of {', '.join(ENGINES)}"}
     if engine == "auto" and deps.detect is None:
         return {"sent": False, "error": ASK_FIRST}
-    problem = check_path(path)
+    problem = check_path(path, deps.is_audio)
     if problem:
         return {"sent": False, "error": problem}
     path = os.path.abspath(path)
@@ -185,6 +195,7 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
         )
 
     body = with_footer(text)
+    shared = text.strip() if deps.share_papareo_text else None
     del text
     try:
         info = deps.vault().put(
@@ -222,9 +233,22 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
                 f"The Papa Reo transcript is safe in the vault but couldn't be sent ({code}). "
                 f"{_RESEND_HINT.get(code, 'It can be resent with ovenmitt_vault_send.')}"
             ),
+            **_shared(shared),
         }
     logger.info("papareo_transcribe: Papa Reo transcript sent as %s (%s)", info.handle, ",".join(reasons))
-    return {"sent": True, "engine": "papareo", "transcribed_by": PAPAREO_SOURCE, "handle": info.handle, "filename": filename}
+    return {
+        "sent": True,
+        "engine": "papareo",
+        "transcribed_by": PAPAREO_SOURCE,
+        "handle": info.handle,
+        "filename": filename,
+        **_shared(shared),
+    }
+
+
+def _shared(text: str | None) -> dict[str, Any]:
+    """The Papa Reo text, for an agent declared Kaitiakitanga-compliant."""
+    return {} if text is None else {"text": text, "kaitiakitanga_compliant": True}
 
 
 def _export_copy(handle: str, filename: str, deps: Deps) -> None:
@@ -272,6 +296,13 @@ def _deliver_local(local: LocalResult, filename: str, note: str | None, deps: De
         out["sent"] = False
         out["note"] = ((note + " ") if note else "") + "The file couldn't be attached; the text is above."
     return out
+
+
+def _safe(is_audio: Callable[[str], bool], path: str) -> bool:
+    try:
+        return bool(is_audio(path))
+    except Exception:  # noqa: BLE001 - can't tell: treat as not audio
+        return False
 
 
 def _probe(deps: Deps, path: str) -> float | None:

@@ -95,6 +95,21 @@ def probe_duration(path: str) -> float | None:
         return None
 
 
+def has_audio(path: str) -> bool:
+    """Whether ffprobe finds an audio stream, whatever the file is called."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type",
+         "-of", "default=nw=1:nk=1", path],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    return proc.returncode == 0 and "audio" in proc.stdout
+
+
 class LocalWhisper:
     """One cached model, loaded lazily, unloaded when idle."""
 

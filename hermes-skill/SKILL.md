@@ -22,13 +22,21 @@ If they said it up front ("transcribe this with Papa Reo"), don't ask again. Don
 
 ## The tool
 
-`transcribe_recording(path, engine)`, with `engine` either `"local"` or `"papareo"`. It **sends the transcript to this chat as a .txt file itself**. Don't send it again.
+`transcribe_recording(path, engine)`, with `engine` either `"local"` or `"papareo"`. Pass the path exactly as the message gave it, even if it ends in `.bin` or has no extension: the tool checks the content, so don't rename, copy or convert the file first. It **sends the transcript to this chat as a .txt file itself**. Don't send it again.
 
 - **`local`**: whisper on this machine. You get back the `text`. Say it's attached and what made it (the result's `transcribed_by`, e.g. "whisper large-v3-turbo, run locally"). **Don't summarise, translate or quote it unless they ask.** You can answer questions about it when they do.
-- **`papareo`**: the recording goes to Papa Reo, Te Hiku Media's speech recognition for te reo Māori. You get back a `handle` and no text. The transcript is protected under the Kaitiakitanga License: it must never pass through you. Say it's attached and that Papa Reo made it. Don't summarise it, guess at it, or ask to see it. See the `ovenmitt` skill for what a handle is.
+- **`papareo`**: the recording goes to Papa Reo, Te Hiku Media's speech recognition for te reo Māori. You get back a `handle`, and usually no text: the transcript is protected under the Kaitiakitanga License and must not pass through you. Say it's attached and that Papa Reo made it. Don't summarise it, guess at it, or ask to see it. See the `ovenmitt` skill for what a handle is.
+- **`papareo` on an agent declared compliant**: if the result also has `text` and `"kaitiakitanga_compliant": true`, the people who run you have declared you deployed in line with the licence (your system instructions say so too). You may then work with that text **when the person asks**: answer questions, summarise, translate. Still say it's attached rather than repeating it unprompted, and never pass it to another tool or service (web search, other agents, files outside the vault, messages to other chats).
 - A `note` in the result means something didn't go as planned, for example Papa Reo wasn't available. Pass it on in plain words. If it suggests a local transcript instead, ask before running one.
 
 Each Papa Reo run costs money, so never retry it on your own; let the person ask.
+
+## The Kaitiakitanga License
+
+Papa Reo transcripts come under the [Kaitiakitanga License](https://papareo.io/kaitiakitanga). When you tell someone a Papa Reo transcript is attached:
+
+- **Link the licence.** Where the chat shows links (Discord, Slack, Telegram), make the words "Kaitiakitanga License" the link. Signal and plain-text chats can't hide a link behind words, so put the URL straight after them: Kaitiakitanga License (https://papareo.io/kaitiakitanga).
+- **Remind them once.** The first time in a conversation, add one short line asking them to follow its terms, for example: "Please use it within the terms of the Kaitiakitanga License, and don't paste it into AI tools." Don't repeat that reminder for later transcripts in the same conversation; the link is enough.
 
 ## Resending
 
