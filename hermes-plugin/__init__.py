@@ -1,11 +1,12 @@
 """papareo_transcribe: transcripts of recordings, escalated to Papa Reo when
 they may contain te reo Māori.
 
-One tool, ``transcribe_recording(path, engine)``. It runs local whisper,
-asks the detector, and either sends the local transcript to this chat or,
-when the recording may contain Māori and a safe way out exists, sends the
-original audio to Papa Reo, puts the result in the ovenmitt vault and has
-the ovenmitt bridge send it here. Papa Reo text never reaches the model.
+One tool, ``transcribe_recording(path, engine)``. It runs local whisper and
+sends the local transcript to this chat, or, when the person asks for Papa
+Reo (engine="papareo") and a safe way out exists, sends the original audio
+to Papa Reo, puts the result in the ovenmitt vault and has the ovenmitt
+bridge send it here. Papa Reo text never reaches the model. Automatic
+detection of te reo (the may_contain_mi project) is not wired in yet.
 
 The Papa Reo key arrives in the process environment (a sealed key: compose
 ``environment:``, never ``.env``) and is popped out of it as this module's
@@ -26,7 +27,7 @@ import logging  # noqa: E402
 import sys  # noqa: E402
 from typing import Any  # noqa: E402
 
-from . import deliver, detector, transcribe  # noqa: E402
+from . import deliver, transcribe  # noqa: E402
 from .local import LocalWhisper  # noqa: E402
 from .papareo import PapareoClient  # noqa: E402
 
@@ -43,11 +44,11 @@ SCHEMA: dict[str, Any] = {
     "name": "transcribe_recording",
     "description": (
         "Transcribe a recording (a voice note or an audio file the user sent) and send the "
-        "transcript to this chat as a .txt file. English is transcribed locally and you get the "
-        "text back. If the recording may contain te reo Māori, it goes to Papa Reo instead and "
-        "you get only a handle: the transcript is protected, and you must not try to read it. "
-        "engine: 'auto' (default) decides; 'papareo' when the user asks for Papa Reo or says it is "
-        "in Māori; 'local' when the user asks for a plain NZ English transcript."
+        "transcript to this chat as a .txt file. By default it is transcribed locally and you get "
+        "the text back. With engine='papareo' it goes to Papa Reo instead (te reo Māori speech "
+        "recognition, a paid call) and you get only a handle: the transcript is protected, and you "
+        "must not try to read it. engine: 'auto' (default, local for now); 'papareo' when the user "
+        "asks for Papa Reo or says it is in Māori; 'local' for a plain NZ English transcript."
     ),
     "parameters": {
         "type": "object",
@@ -98,7 +99,6 @@ def register(ctx: Any) -> None:
     papareo = PapareoClient(_POPPED_KEY)
     socket_path = os.environ.get(SOCKET_ENV) or DEFAULT_SOCKET
     whisper = LocalWhisper()
-    model = detector.TrigramModel.load()
     vault_client: list[Any] = []
 
     def vault() -> Any:
@@ -117,7 +117,6 @@ def register(ctx: Any) -> None:
 
     deps = transcribe.Deps(
         local=whisper.transcribe,
-        detect=lambda text, language: detector.decide(text, language, model),
         papareo=papareo,
         vault=vault,
         send_local=deliver.send_local,

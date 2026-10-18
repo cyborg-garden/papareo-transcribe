@@ -88,16 +88,17 @@ class World:
                 raise RuntimeError("whisper fell over")
             return self.local_result
 
+        # escalate=None and no detector_fails: no detector plugged in (today's
+        # plugin). Otherwise a stand-in for may_contain_mi through Deps.detect.
         def detect(text, language):
             if self.detector_fails:
                 raise ValueError("bug")
-            if self.escalate is None:
-                return p.detector.decide(text, language, p.detector.TrigramModel.load())
-            return p.detector.Decision(self.escalate, ("forced",) if self.escalate else (), 0.0)
+            return p.transcribe.Decision(self.escalate, ("forced",) if self.escalate else (), 0.0)
 
+        no_detector = self.escalate is None and not self.detector_fails
         return p.transcribe.Deps(
             local=local,
-            detect=detect,
+            detect=None if no_detector else detect,
             papareo=self.papareo,
             vault=lambda: self.vault_,
             send_local=lambda f, t, c: self.local_sent.append((f, t, c)),
@@ -135,8 +136,14 @@ def test_english_goes_local_and_the_agent_sees_the_text(plugin, memo):
     assert w.papareo.calls == 0 and w.vault_.puts == [] and w.handle_sent == []
 
 
-def test_maori_goes_to_papareo_vault_and_bridge(plugin, memo):
-    w = World(plugin, text="Kia ora, tēnā koutou katoa.", language="en")
+def test_without_a_detector_auto_stays_local_even_for_te_reo(plugin, memo):
+    w = World(plugin, text="Kia ora, tēnā koutou katoa.", language="mi")
+    r = w.run(memo)
+    assert r["engine"] == "local" and w.papareo.calls == 0 and w.vault_.puts == []
+
+
+def test_flagged_recording_goes_to_papareo_vault_and_bridge(plugin, memo):
+    w = World(plugin, text="Kia ora, tēnā koutou katoa.", language="en", escalate=True)
     r = w.run(memo)
     assert r == {"sent": True, "engine": "papareo", "handle": "v_0123456789ab", "filename": FILENAME}
     assert w.papareo.calls == 1
@@ -156,7 +163,7 @@ def test_maori_goes_to_papareo_vault_and_bridge(plugin, memo):
 
 
 def test_engine_local_overrides_the_detector(plugin, memo):
-    w = World(plugin, text="Tēnā koutou katoa", language="mi")
+    w = World(plugin, text="Tēnā koutou katoa", language="mi", escalate=True)
     r = w.run(memo, engine="local")
     assert r["engine"] == "local" and w.papareo.calls == 0
 

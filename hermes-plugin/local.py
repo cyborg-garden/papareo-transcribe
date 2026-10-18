@@ -2,8 +2,8 @@
 
 The model named in ``stt.local.model`` (Swarm Map sets ``large-v3-turbo``)
 loads on first use and unloads after a quiet spell, so an idle agent gives
-the memory back. ``language=None`` matters: whisper's language guess is one
-of the detector's signals, and forcing English would also mangle te reo.
+the memory back. ``language=None`` matters: forcing English would mangle te
+reo, and whisper's language guess is one of may_contain_mi's signals.
 """
 
 from __future__ import annotations

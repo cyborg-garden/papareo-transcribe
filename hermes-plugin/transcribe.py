@@ -1,4 +1,9 @@
-"""transcribe_recording: local pass, detector, escalation and delivery.
+"""transcribe_recording: local pass, escalation and delivery.
+
+Which recordings escalate: those the person asks for (engine="papareo").
+Automatic detection ("may this contain te reo Māori?") lives in its own
+project, may_contain_mi, and is not wired in yet: ``Deps.detect`` is the
+seam for it, and while it is None, engine="auto" means local.
 
 The rule for escalation: check there is a safe way out before spending
 money on Papa Reo. The safe way out is the vault plus a send destination
@@ -20,7 +25,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .detector import Decision
 from .local import LocalResult
 from .papareo import NotConfigured, PapareoClient, PapareoError, with_footer
 
@@ -38,10 +42,19 @@ SUPPORTED = {
 MAX_BYTES = 100 * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class Decision:
+    """What a detector says about a local transcript (the shape of
+    may_contain_mi's Decision, without depending on it)."""
+
+    escalate: bool
+    reasons: tuple[str, ...]
+    score: float
+
+
 @dataclass
 class Deps:
     local: Callable[[str], LocalResult]
-    detect: Callable[[str, str], Decision]
     papareo: PapareoClient
     vault: Callable[[], Any]  # -> ovenmitt.VaultClient
     send_local: Callable[[str, str, str | None], None]  # filename, text, caption
@@ -51,6 +64,9 @@ class Deps:
     bridge_problem: Callable[[], str | None]
     now: Callable[[], datetime]
     filename_for: Callable[[str, datetime], str]
+    # (text, whisper language) -> Decision. None until may_contain_mi is
+    # wired in; then engine="auto" only escalates what it flags.
+    detect: Callable[[str, str], Decision] | None = None
 
 
 def _caption(note: str | None = None) -> str:
@@ -112,6 +128,8 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
     if engine == "auto":
         if local is None:
             escalate, reasons = True, ("local-failed",)
+        elif deps.detect is None:
+            escalate, reasons = False, ()
         else:
             try:
                 decision = deps.detect(local.text, local.language)

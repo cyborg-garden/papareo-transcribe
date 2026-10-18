@@ -2,12 +2,12 @@ name: papareo_transcribe
 version: 0.1.0
 description: >-
   Transcripts of recordings as a deliverable. transcribe_recording runs local
-  whisper (large-v3-turbo, language auto-detected), and a small detector
-  decides whether the recording may contain te reo Maori. English: the local
-  transcript is sent to this chat as a .txt and the agent sees the text. May
-  contain Maori: the original audio goes to Papa Reo, the result goes into the
-  ovenmitt vault, and the ovenmitt bridge sends it here; the agent gets only a
-  handle. Before any Papa Reo call it checks that the vault is up and that a
+  whisper (large-v3-turbo, language auto-detected) and sends the transcript
+  to this chat as a .txt; the agent sees the text. When the person asks for
+  Papa Reo (engine=papareo): the original audio goes to Papa Reo, the result
+  goes into the ovenmitt vault, and the ovenmitt bridge sends it here; the
+  agent gets only a handle. Automatic te reo detection (may_contain_mi) is
+  not wired in yet. Before any Papa Reo call it checks that the vault is up and that a
   destination is declared for this chat's platform. Needs the ovenmitt_bridge
   plugin, the ovenmitt Python package, and PAPAREO_API_KEY (popped from the
   environment at load; without it, local only).
