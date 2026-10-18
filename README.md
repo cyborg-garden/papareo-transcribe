@@ -31,7 +31,7 @@ Papa Reo transcripts end with this footer, added before they enter the vault:
 ```
 hermes-plugin/   the plugin: transcribe_recording          → plugins/papareo_transcribe/
 hermes-skill/    SKILL.md                                  → skills/papareo-transcribe/
-scripts/         fetch_corpus.py, train_detector.py, tune.py, papareo_smoke.py
+scripts/         fetch_corpus.py, train_detector.py, tune.py, papareo_do_transcribe.py
 tests/
 ```
 
@@ -65,13 +65,11 @@ The bar: every mixed and te reo recording trips. False positives on English are 
 
 ## The Papa Reo client
 
-Built to the published API spec (`POST /tuhi/transcribe` under five minutes; the `/tuhi/transcribe/large` start-poll-download flow above that; `Authorization: Token <key>`). It is **switched off** (`LIVE_VERIFIED = False` in `hermes-plugin/papareo.py`) until one live call confirms it:
+Built to the published API spec (`POST /tuhi/transcribe` under five minutes; the `/tuhi/transcribe/large` start-poll-download flow above that; `Authorization: Token <key>`). Verified live on 2026-10-18: one short recording and one long one through `--large`, each response in the shape the client reads. To check it again (one paid call per run; prints response shapes, never the transcript unless you pass `--show`):
 
 ```sh
-PAPAREO_API_KEY=... python -I scripts/papareo_smoke.py <a short recording of your own>
+PAPAREO_API_KEY=... python -I scripts/papareo_do_transcribe.py <a short recording of your own>
 ```
-
-Not yet verified.
 
 ## Development
 
