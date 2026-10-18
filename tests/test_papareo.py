@@ -15,20 +15,8 @@ def audio(tmp_path):
     return p
 
 
-def client(plugin, handler, *, key="k-123", verified=True):
-    return plugin.papareo.PapareoClient(
-        key, transport=httpx.MockTransport(handler), sleep=lambda s: None, verified=verified
-    )
-
-
-def test_unverified_client_makes_no_request(plugin, audio):
-    def handler(request):  # pragma: no cover
-        raise AssertionError("no request may be made")
-
-    c = client(plugin, handler, verified=False)
-    assert not c.configured
-    with pytest.raises(plugin.papareo.NotConfigured, match="verified"):
-        c.transcribe(str(audio), 10.0)
+def client(plugin, handler, *, key="k-123"):
+    return plugin.papareo.PapareoClient(key, transport=httpx.MockTransport(handler), sleep=lambda s: None)
 
 
 def test_no_key_makes_no_request(plugin, audio):
@@ -37,10 +25,6 @@ def test_no_key_makes_no_request(plugin, audio):
 
     with pytest.raises(plugin.papareo.NotConfigured, match="no Papa Reo key"):
         client(plugin, handler, key=None).transcribe(str(audio), 10.0)
-
-
-def test_live_verified_defaults_off(plugin):
-    assert plugin.papareo.LIVE_VERIFIED is False
 
 
 def test_short_recording(plugin, audio):

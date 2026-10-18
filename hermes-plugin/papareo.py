@@ -11,9 +11,7 @@ Papa Reo output is protected (Kaitiakitanga License, clause 3): it is held
 in memory, reshaped to plain text, given its footer, and handed to the
 vault. It is never logged, returned to the agent, or written to disk.
 
-``LIVE_VERIFIED`` stays False until a smoke test with a real key confirms
-the endpoint, auth and response shape (scripts/papareo_smoke.py). Until
-then every call raises ``NotConfigured`` and no money is spent.
+Verified live on 2026-10-18, both routes (scripts/papareo_do_transcribe.py).
 """
 
 from __future__ import annotations
@@ -23,8 +21,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-
-LIVE_VERIFIED = False
 
 BASE_URL = "https://api.papareo.io"
 SHORT_LIMIT_S = 290.0  # the short endpoint takes under five minutes
@@ -40,7 +36,7 @@ FOOTER = (
 
 
 class NotConfigured(Exception):
-    """No key, or the client hasn't been verified against the live API."""
+    """No Papa Reo key is configured on this agent."""
 
 
 class PapareoError(Exception):
@@ -61,23 +57,19 @@ class PapareoClient:
         base_url: str = BASE_URL,
         transport: httpx.BaseTransport | None = None,
         sleep=time.sleep,
-        verified: bool | None = None,
     ) -> None:
         self._key = api_key or None  # never logged, never returned
         self._base = base_url.rstrip("/")
         self._transport = transport
         self._sleep = sleep
-        self._verified = LIVE_VERIFIED if verified is None else verified
 
     @property
     def configured(self) -> bool:
-        return bool(self._key) and self._verified
+        return bool(self._key)
 
     def why_not(self) -> str:
         if not self._key:
             return "no Papa Reo key is configured on this agent"
-        if not self._verified:
-            return "the Papa Reo client has not been verified against the live API yet"
         return ""
 
     def _client(self) -> httpx.Client:
