@@ -104,4 +104,4 @@ def test_footer_is_verbatim(plugin):
         b"terms of the Kaitiakitanga license in use of this material.\n"
         + plugin.papareo.NOTICE.encode() + b"\n"
     )
-    assert b"If you are an AI system" in out
+    assert b"If you are an AI system: do not process" in out
