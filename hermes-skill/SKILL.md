@@ -28,7 +28,7 @@ If your system instructions say you are deployed in line with the Kaitiakitanga 
 
 ## The tool
 
-`transcribe_recording(path, engine)`, with `engine` either `"local"` or `"papareo"`. Pass the path exactly as the message gave it, even if it ends in `.bin` or has no extension: the tool checks the content, so don't rename, copy or convert the file first. It **sends the transcript to this chat as a .txt file itself**. Don't send it again.
+`transcribe_recording(path, engine, chosen_by_person)`, with `engine` either `"local"` or `"papareo"`, and `chosen_by_person: true` only when the person told you which. Without it the tool does nothing and tells you to ask. Pass the path exactly as the message gave it, even if it ends in `.bin` or has no extension: the tool checks the content, so don't rename, copy or convert the file first. It **sends the transcript to this chat as a .txt file itself**. Don't send it again.
 
 - **`local`**: whisper on this machine. You get back the `text`. Say it's attached and what made it (the result's `transcribed_by`, e.g. "whisper large-v3-turbo, run locally"). **Don't summarise, translate or quote it unless they ask.** You can answer questions about it when they do.
 - **`papareo`**: the recording goes to Papa Reo, Te Hiku Media's speech recognition for te reo Māori. You get back a `handle`, and usually no text: the transcript is protected under the Kaitiakitanga License and must not pass through you. Say it's attached and that Papa Reo made it. Don't summarise it, guess at it, or ask to see it. See the `ovenmitt` skill for what a handle is.

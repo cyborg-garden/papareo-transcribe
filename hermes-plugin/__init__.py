@@ -46,7 +46,8 @@ SCHEMA: dict[str, Any] = {
     "description": (
         "Transcribe a recording (a voice note or an audio file the user sent) and send the "
         "transcript to this chat as a .txt file. Ask the person which engine first, unless they "
-        "already said. engine='local': whisper on this machine, free, and you get the text back. "
+        "already said, and set chosen_by_person=true only when the person picked it: otherwise "
+        "nothing runs. engine='local': whisper on this machine, free, and you get the text back. "
         "engine='papareo': Papa Reo, Te Hiku Media's speech recognition for te reo Māori, a paid "
         "call; you get only a handle, because the transcript is protected and you must not try to "
         "read it."
@@ -56,8 +57,13 @@ SCHEMA: dict[str, Any] = {
         "properties": {
             "path": {"type": "string", "description": "Path of the recording, as the message gave it."},
             "engine": {"type": "string", "enum": ["local", "papareo"]},
+            "chosen_by_person": {
+                "type": "boolean",
+                "description": "True only if the person told you which engine (in this conversation). "
+                "Never guess or choose for them.",
+            },
         },
-        "required": ["path", "engine"],
+        "required": ["path", "engine", "chosen_by_person"],
     },
 }
 
@@ -137,7 +143,8 @@ def register(ctx: Any) -> None:
     def handle(args: dict[str, Any], **_: Any) -> str:
         path = str(args.get("path") or "")
         engine = str(args.get("engine") or "auto")  # missing: refused with ASK_FIRST
-        return json.dumps(transcribe.run(path, engine, deps), ensure_ascii=False)
+        chosen = args.get("chosen_by_person") is True or str(args.get("chosen_by_person")).lower() == "true"
+        return json.dumps(transcribe.run(path, engine, deps, chosen_by_person=chosen), ensure_ascii=False)
 
     ctx.register_tool(
         name="transcribe_recording",

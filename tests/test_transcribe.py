@@ -141,7 +141,9 @@ def test_english_goes_local_and_the_agent_sees_the_text(plugin, memo):
     w = World(plugin)
     r = w.run(memo, engine="local")
     src = "whisper large-v3-turbo, run locally"
-    assert r == {"engine": "local", "transcribed_by": src, "filename": FILENAME, "text": w.local_result.text, "sent": True}
+    assert r == {"engine": "local", "transcribed_by": src, "filename": FILENAME, "text": w.local_result.text,
+                 "next": plugin.transcribe.NEXT_LOCAL, "sent": True}
+    assert "Don't summarise" in r["next"]
     assert w.local_sent == [
         (FILENAME, f"{w.local_result.text}\n\nTranscribed by {src}.\n", f"Transcript ({src})")
     ], "the file and its caption say what made it"
@@ -151,7 +153,7 @@ def test_english_goes_local_and_the_agent_sees_the_text(plugin, memo):
 def test_without_a_detector_the_agent_must_ask_first(plugin, memo):
     w = World(plugin, text="Kia ora, tēnā koutou katoa.", language="mi")
     r = w.run(memo)  # engine="auto"
-    assert r["sent"] is False and r["error"].startswith("Ask the person first")
+    assert r["sent"] is False and r["error"].startswith("Nothing was transcribed. Ask the person first")
     assert w.local_calls == 0 and w.papareo.calls == 0 and w.local_sent == []
 
 
@@ -182,7 +184,8 @@ def test_flagged_recording_goes_to_papareo_vault_and_bridge(plugin, memo):
     w = World(plugin, text="Kia ora, tēnā koutou katoa.", language="en", escalate=True)
     r = w.run(memo)
     assert r == {"sent": True, "engine": "papareo", "transcribed_by": "Papa Reo, Te Hiku Media",
-                 "handle": "v_0123456789ab", "filename": FILENAME}
+                 "handle": "v_0123456789ab", "filename": FILENAME, "next": plugin.transcribe.NEXT_PAPAREO}
+    assert "https://papareo.io/kaitiakitanga" in r["next"]
     assert w.papareo.calls == 1
     [put] = w.vault_.puts
     assert put["vault"] == "papareo"
@@ -393,3 +396,11 @@ def test_not_declared_means_no_papareo_text(plugin, memo):
     r = w.run(memo, engine="papareo")
     assert "text" not in r and "kaitiakitanga_compliant" not in r
     assert_no_papareo_text(r, w)
+
+
+def test_nothing_runs_unless_the_person_chose(plugin, memo):
+    for engine in ("local", "papareo"):
+        w = World(plugin)
+        r = plugin.transcribe.run(str(memo), engine, w.deps(), chosen_by_person=False)
+        assert r["sent"] is False and r["error"].startswith("Nothing was transcribed. Ask the person first")
+        assert w.local_calls == 0 and w.papareo.calls == 0 and w.local_sent == []

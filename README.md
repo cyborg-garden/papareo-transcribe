@@ -14,7 +14,7 @@ The vault is the licence valve; the person (and later the detector) is the cost 
 ## How it works
 
 ```
-transcribe_recording(path, engine)          the agent asked the person first
+transcribe_recording(path, engine, chosen_by_person)   refused unless the person chose
   engine="local"   → whisper (large-v3-turbo) → .txt to this chat; the agent gets the text
   engine="papareo" → preflight: Papa Reo key, ovenmitt bridge, vault up, destination declared
                      for this chat's platform; if any fails, a note and nothing spent
