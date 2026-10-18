@@ -1,13 +1,13 @@
 name: papareo_transcribe
 version: 0.1.0
 description: >-
-  Transcripts of recordings as a deliverable. transcribe_recording runs local
-  whisper (large-v3-turbo, language auto-detected) and sends the transcript
-  to this chat as a .txt; the agent sees the text. When the person asks for
-  Papa Reo (engine=papareo): the original audio goes to Papa Reo, the result
-  goes into the ovenmitt vault, and the ovenmitt bridge sends it here; the
-  agent gets only a handle. Automatic te reo detection (may_contain_mi) is
-  not wired in yet. Before any Papa Reo call it checks that the vault is up and that a
+  Transcripts of recordings as a deliverable; the agent asks the person
+  which engine first. engine=local runs whisper (large-v3-turbo) and sends
+  the transcript to this chat as a .txt; the agent sees the text.
+  engine=papareo sends the original audio to Papa Reo (whisper doesn't run),
+  the result goes into the ovenmitt vault, and the ovenmitt bridge sends it
+  here; the agent gets only a handle. Automatic te reo detection
+  (may_contain_mi) is not wired in yet. Before any Papa Reo call it checks that the vault is up and that a
   destination is declared for this chat's platform. Needs the ovenmitt_bridge
   plugin, the ovenmitt Python package, and PAPAREO_API_KEY (popped from the
   environment at load; without it, local only).

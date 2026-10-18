@@ -1,9 +1,10 @@
 """transcribe_recording: local pass, escalation and delivery.
 
-Which recordings escalate: those the person asks for (engine="papareo").
-Automatic detection ("may this contain te reo Māori?") lives in its own
-project, may_contain_mi, and is not wired in yet: ``Deps.detect`` is the
-seam for it, and while it is None, engine="auto" means local.
+One engine per call, chosen by the person: the agent asks first. "local"
+runs whisper here; "papareo" sends the original audio to Papa Reo and never
+runs whisper. Automatic detection ("may this contain te reo Māori?") lives
+in its own project, may_contain_mi, and is not wired in yet: ``Deps.detect``
+is the seam for it, and engine="auto" is refused until it is set.
 
 The rule for escalation: check there is a safe way out before spending
 money on Papa Reo. The safe way out is the vault plus a send destination
@@ -64,13 +65,23 @@ class Deps:
     bridge_problem: Callable[[], str | None]
     now: Callable[[], datetime]
     filename_for: Callable[[str, datetime], str]
+    # Seconds of audio, for picking Papa Reo's short or long endpoint when
+    # whisper didn't run (engine="papareo"). None if unknown.
+    duration: Callable[[str], float | None] | None = None
     # (text, whisper language) -> Decision. None until may_contain_mi is
-    # wired in; then engine="auto" only escalates what it flags.
+    # wired in; until then engine="auto" is refused (ask the person instead).
     detect: Callable[[str, str], Decision] | None = None
 
 
-def _caption(note: str | None = None) -> str:
-    return f"Transcript. {note}" if note else "Transcript"
+PAPAREO_SOURCE = "Papa Reo, Te Hiku Media"
+
+
+def local_source(local: LocalResult) -> str:
+    return f"whisper {local.model}, run locally" if local.model else "whisper, run locally"
+
+
+def _caption(source: str, note: str | None = None) -> str:
+    return f"Transcript ({source}). {note}" if note else f"Transcript ({source})"
 
 
 def check_path(path: str) -> str | None:
@@ -105,20 +116,31 @@ def preflight(deps: Deps) -> str | None:
     return None
 
 
+ASK_FIRST = (
+    "Ask the person first which they want, then call again with engine='local' (whisper on "
+    "this machine, free; you see the text) or engine='papareo' (Papa Reo, for te reo Māori; "
+    "a paid call; the transcript is protected and you won't see it)."
+)
+
+
 def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
     if engine not in ENGINES:
         return {"sent": False, "error": f"engine must be one of {', '.join(ENGINES)}"}
+    if engine == "auto" and deps.detect is None:
+        return {"sent": False, "error": ASK_FIRST}
     problem = check_path(path)
     if problem:
         return {"sent": False, "error": problem}
     path = os.path.abspath(path)
     filename = deps.filename_for(path, deps.now())
 
+    # Whisper runs only when its transcript is wanted: never on the Papa Reo path.
     local: LocalResult | None = None
-    try:
-        local = deps.local(path)
-    except Exception:  # noqa: BLE001
-        logger.exception("papareo_transcribe: local transcription failed")
+    if engine != "papareo":
+        try:
+            local = deps.local(path)
+        except Exception:  # noqa: BLE001
+            logger.exception("papareo_transcribe: local transcription failed")
 
     if engine == "local":
         if local is None:
@@ -128,11 +150,9 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
     if engine == "auto":
         if local is None:
             escalate, reasons = True, ("local-failed",)
-        elif deps.detect is None:
-            escalate, reasons = False, ()
         else:
             try:
-                decision = deps.detect(local.text, local.language)
+                decision = deps.detect(local.text, local.language)  # type: ignore[misc]
                 escalate, reasons = decision.escalate, decision.reasons
                 logger.info(
                     "papareo_transcribe: detector escalate=%s reasons=%s score=%.3f",
@@ -149,26 +169,19 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
     why_not = preflight(deps)
     if why_not:
         logger.info("papareo_transcribe: escalation skipped before any spend: %s", why_not)
-        return _fallback(local, filename, f"It may contain te reo Māori, but Papa Reo wasn't used: {why_not}.", deps)
+        return _fallback(local, filename, f"Papa Reo wasn't used, and nothing was spent: {why_not}.", deps)
 
-    duration = local.duration if local is not None else None
+    duration = local.duration if local is not None else _probe(deps, path)
     try:
         text = deps.papareo.transcribe(path, duration)
     except (NotConfigured, PapareoError) as e:
         logger.warning("papareo_transcribe: Papa Reo failed: %s", e)
-        return _fallback(
-            local, filename,
-            f"Papa Reo didn't complete ({e}), so this is the local transcript. Ask again to retry Papa Reo.",
-            deps,
-        )
-    except Exception as e:  # noqa: BLE001 - any other failure still gets the user the local transcript
+        return _fallback(local, filename, f"Papa Reo didn't complete ({e}). Ask again to retry Papa Reo.", deps)
+    except Exception as e:  # noqa: BLE001 - any other failure still gets a clean answer
         # Only the type: an unexpected error's message is not ours to vouch for.
         logger.warning("papareo_transcribe: Papa Reo failed unexpectedly: %s", type(e).__name__)
         return _fallback(
-            local, filename,
-            "Papa Reo didn't complete (an unexpected error), so this is the local transcript. "
-            "Ask again to retry Papa Reo.",
-            deps,
+            local, filename, "Papa Reo didn't complete (an unexpected error). Ask again to retry Papa Reo.", deps
         )
 
     body = with_footer(text)
@@ -181,8 +194,7 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
         logger.exception("papareo_transcribe: vault put failed after a Papa Reo call")
         return _fallback(
             local, filename,
-            "Papa Reo transcribed it, but storing the protected transcript failed, so nothing "
-            "was kept. This is the local transcript instead.",
+            "Papa Reo transcribed it, but storing the protected transcript failed, so nothing was kept.",
             deps,
             paid=True,
         )
@@ -194,7 +206,7 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
     # From here on Papa Reo is paid for and the transcript is stored: whatever
     # the send does, the agent must leave with the handle.
     try:
-        result = deps.send_handle(info.handle, filename, _caption())
+        result = deps.send_handle(info.handle, filename, _caption(PAPAREO_SOURCE))
     except Exception:  # noqa: BLE001
         logger.exception("papareo_transcribe: the send tool raised")
         result = {}
@@ -212,7 +224,7 @@ def run(path: str, engine: str, deps: Deps) -> dict[str, Any]:
             ),
         }
     logger.info("papareo_transcribe: Papa Reo transcript sent as %s (%s)", info.handle, ",".join(reasons))
-    return {"sent": True, "engine": "papareo", "handle": info.handle, "filename": filename}
+    return {"sent": True, "engine": "papareo", "transcribed_by": PAPAREO_SOURCE, "handle": info.handle, "filename": filename}
 
 
 def _export_copy(handle: str, filename: str, deps: Deps) -> None:
@@ -247,11 +259,13 @@ def _send_error_code(result: Any) -> str:
 
 
 def _deliver_local(local: LocalResult, filename: str, note: str | None, deps: Deps) -> dict[str, Any]:
-    out: dict[str, Any] = {"engine": "local", "filename": filename, "text": local.text}
+    source = local_source(local)
+    out: dict[str, Any] = {"engine": "local", "transcribed_by": source, "filename": filename, "text": local.text}
     if note:
         out["note"] = note
     try:
-        deps.send_local(filename, local.text, _caption(note))
+        # The file says where it came from, as Papa Reo's footer does.
+        deps.send_local(filename, f"{local.text.strip()}\n\nTranscribed by {source}.\n", _caption(source, note))
         out["sent"] = True
     except Exception as e:  # noqa: BLE001
         logger.warning("papareo_transcribe: couldn't attach the local transcript: %s", e)
@@ -260,12 +274,28 @@ def _deliver_local(local: LocalResult, filename: str, note: str | None, deps: De
     return out
 
 
+def _probe(deps: Deps, path: str) -> float | None:
+    try:
+        return deps.duration(path) if deps.duration else None
+    except Exception:  # noqa: BLE001 - unknown length: Papa Reo's short endpoint is tried
+        return None
+
+
 def _fallback(
     local: LocalResult | None, filename: str, note: str, deps: Deps, paid: bool = False
 ) -> dict[str, Any]:
+    """Papa Reo didn't deliver. With a local transcript in hand (engine="auto",
+    later), send that; otherwise say so and leave the choice to the person."""
     if local is None:
-        return {"sent": False, "engine": "none", "note": note + " The local transcription failed too."}
-    out = _deliver_local(local, filename, note, deps)
+        out: dict[str, Any] = {
+            "sent": False,
+            "engine": "none",
+            "note": note + " No local transcript was made; ask whether they want one (engine='local').",
+        }
+        if paid:
+            out["papareo_charged"] = True
+        return out
+    out = _deliver_local(local, filename, note + " This is the local transcript instead.", deps)
     if paid:
         out["papareo_charged"] = True
     return out

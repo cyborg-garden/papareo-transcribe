@@ -26,6 +26,8 @@ class LocalResult:
     language: str
     language_probability: float
     duration: float
+    # The whisper model that made it, e.g. "large-v3-turbo".
+    model: str = ""
 
 
 def configured_model() -> str:
@@ -76,6 +78,23 @@ def _load(name: str) -> Any:
         return WhisperModel(name, device="cpu", compute_type="int8")
 
 
+def probe_duration(path: str) -> float | None:
+    """Seconds of audio, from ffprobe, without decoding it. None if unknown."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    try:
+        return float(proc.stdout.strip())
+    except ValueError:
+        return None
+
+
 class LocalWhisper:
     """One cached model, loaded lazily, unloaded when idle."""
 
@@ -105,6 +124,7 @@ class LocalWhisper:
             language=str(getattr(info, "language", "") or ""),
             language_probability=float(getattr(info, "language_probability", 0.0) or 0.0),
             duration=float(getattr(info, "duration", 0.0) or 0.0),
+            model=name,
         )
 
     def _arm_unload(self) -> None:

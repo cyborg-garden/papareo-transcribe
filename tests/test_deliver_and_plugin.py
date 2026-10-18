@@ -58,6 +58,6 @@ def test_local_whisper_hands_the_model_decoded_samples(plugin, monkeypatch, tmp_
     monkeypatch.setattr(plugin.local, "_load", lambda name: FakeModel())
     w = plugin.local.LocalWhisper("large-v3-turbo", idle_unload_s=60)
     r = w.transcribe(str(tmp_path / "x.ogg"))
-    assert r == plugin.local.LocalResult("kia ora", "mi", 0.8, 1.5)
+    assert r == plugin.local.LocalResult("kia ora", "mi", 0.8, 1.5, model="large-v3-turbo")
     assert seen["audio"] == [0.0] * 24000
     assert seen["kw"]["language"] is None, "language must be auto-detected"

@@ -1,30 +1,34 @@
 ---
 name: papareo-transcribe
-description: Transcribing recordings people send you - voice notes and audio files - with transcribe_recording, including when it escalates to Papa Reo for te reo Māori and what to say back. Read whenever someone sends a recording or asks for a transcript.
+description: Transcribing recordings people send you - voice notes and audio files - with transcribe_recording, asking first whether they want it local or through Papa Reo (te reo Māori), and what to say back. Read whenever someone sends a recording or asks for a transcript.
 ---
 
 # Transcribing recordings
 
-On this agent, a recording someone sends you is **something to transcribe**, not a message to answer. Voice input is switched off here, so a voice note arrives as a line like `[The user sent a voice message: /opt/data/... (duration: 0:42)]`, and an audio file arrives as a path. Either way, call `transcribe_recording` with that path.
+On this agent, a recording someone sends you is **something to transcribe**, not a message to answer. Voice input is switched off here, so a voice note arrives as a line like `[The user sent a voice message: /opt/data/... (duration: 0:42)]`, and an audio file arrives as a path.
 
-## The tool
+## Ask first
 
-`transcribe_recording(path, engine="auto")` transcribes the recording and **sends the transcript to this chat as a .txt file itself**. Don't send it again.
+Before transcribing, ask the person which way they want it, unless they've already said. Keep it to one short question, for example:
 
-- **By default** it's transcribed locally: you get back `"engine": "local"` and the `text`. Tell the person it's attached; you can answer questions about it.
-- **Papa Reo** (when the person asks for it, see below): it goes to Papa Reo, Te Hiku Media's speech recognition for te reo Māori. You get back `"engine": "papareo"` and a `handle`, and no text. The transcript is protected under the Kaitiakitanga License: it must never pass through you. Say it's attached. Don't summarise it, guess at it, or ask to see it. See the `ovenmitt` skill for what a handle is.
-- A `note` in the result means something didn't go as planned, for example the transcript is local because Papa Reo wasn't available. Pass the note on in plain words.
-
-## When to pick an engine
-
-Leave `engine` as `auto` unless the person tells you otherwise. `auto` is local for now: automatic te reo detection isn't switched on yet.
+> Want a local transcript (free), or Papa Reo (best for te reo Māori; it costs a little, and I won't see the text)?
 
 | They say something like | engine |
 |---|---|
-| "send this to Papa Reo", "it's in te reo", "treat it as Māori" | `papareo` |
-| "just a normal transcript", "transcribe as NZ English" | `local` |
+| "local", "just a normal transcript", "it's English" | `local` |
+| "Papa Reo", "it's in te reo", "treat it as Māori" | `papareo` |
 
-If a local transcript looks like it has te reo Māori in it (Māori words, or English that reads like a mangled attempt at them), say so and offer to send it to Papa Reo. Each Papa Reo run costs money, so ask first and run it again with `engine="papareo"` only when they say yes.
+If they said it up front ("transcribe this with Papa Reo"), don't ask again. Don't pick for them, and don't run both.
+
+## The tool
+
+`transcribe_recording(path, engine)`, with `engine` either `"local"` or `"papareo"`. It **sends the transcript to this chat as a .txt file itself**. Don't send it again.
+
+- **`local`**: whisper on this machine. You get back the `text`. Say it's attached and what made it (the result's `transcribed_by`, e.g. "whisper large-v3-turbo, run locally"). **Don't summarise, translate or quote it unless they ask.** You can answer questions about it when they do.
+- **`papareo`**: the recording goes to Papa Reo, Te Hiku Media's speech recognition for te reo Māori. You get back a `handle` and no text. The transcript is protected under the Kaitiakitanga License: it must never pass through you. Say it's attached and that Papa Reo made it. Don't summarise it, guess at it, or ask to see it. See the `ovenmitt` skill for what a handle is.
+- A `note` in the result means something didn't go as planned, for example Papa Reo wasn't available. Pass it on in plain words. If it suggests a local transcript instead, ask before running one.
+
+Each Papa Reo run costs money, so never retry it on your own; let the person ask.
 
 ## Resending
 

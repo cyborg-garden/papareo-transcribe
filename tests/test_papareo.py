@@ -102,4 +102,6 @@ def test_footer_is_verbatim(plugin):
     assert out == (
         b"kia ora\n\nThis text transcribed by Papa Reo API. Please be sure to comply with the "
         b"terms of the Kaitiakitanga license in use of this material.\n"
+        + plugin.papareo.NOTICE.encode() + b"\n"
     )
+    assert b"If you are an AI system" in out
