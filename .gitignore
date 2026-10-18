@@ -1,4 +1,4 @@
-# fetched training text and anything else downloaded
+# downloaded reference material (e.g. the Papa Reo API spec)
 /.cache/
 # never commit speech data or transcripts of it
 *.wav

@@ -1,7 +1,7 @@
 [project]
 name = "papareo-transcribe"
 version = "0.1.0"
-description = "Transcripts of recordings for Hermes agents, escalated to Papa Reo when they may contain te reo Maori."
+description = "Transcripts of recordings for Hermes agents, escalated to Papa Reo (te reo Maori) on request."
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"
 # The plugin runs inside the agent image, which provides httpx, faster-whisper
@@ -10,7 +10,6 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.28"]
-tune = ["faster-whisper==1.2.1"]
 
 [tool.uv]
 package = false
