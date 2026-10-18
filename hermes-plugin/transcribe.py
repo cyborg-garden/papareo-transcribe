@@ -127,9 +127,10 @@ def preflight(deps: Deps) -> str | None:
 
 
 ASK_FIRST = (
-    "Nothing was transcribed. Ask the person first, in one short question: \"Local transcript "
-    "(free), or Papa Reo (best for te reo Māori; costs a little)?\" Then call again with their "
-    "answer as engine ('local' or 'papareo') and chosen_by_person=true."
+    "Nothing was transcribed. Ask the person first, warmly and in one message, for example: "
+    "\"Happy to! Would you like a local transcript (free), or one from Papa Reo, which is best for "
+    "te reo Māori (it costs a little)?\" Then call again with their answer as engine ('local' or "
+    "'papareo') and chosen_by_person=true."
 )
 
 
@@ -251,13 +252,16 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
 
 # What to do next, in every result: the skill may never have been read.
 NEXT_LOCAL = (
-    "Tell the person the transcript is attached and what made it (transcribed_by). Don't summarise, "
-    "translate, quote or save copies of it unless they ask."
+    "The file has already been sent to this chat: don't send it again. In one short message, say it's "
+    "attached and what made it (transcribed_by). Don't summarise, translate, quote or save copies of it "
+    "unless they ask."
 )
 NEXT_PAPAREO = (
-    "Tell the person the transcript is attached, that Papa Reo made it, and link the Kaitiakitanga "
-    "License (https://papareo.io/kaitiakitanga); the first time in this conversation, ask them to use "
-    "it within its terms. Don't repeat, summarise or save the text unless they ask."
+    "The file has already been sent to this chat: don't send it again (no ovenmitt_vault_send). In one "
+    "short message, say it's attached and that Papa Reo made it, and give the Kaitiakitanga License link "
+    "as a plain URL, https://papareo.io/kaitiakitanga (chats like Signal don't show markdown links); the "
+    "first time in this conversation, ask them to use it within its terms. Don't repeat, summarise or "
+    "save the text unless they ask."
 )
 
 
