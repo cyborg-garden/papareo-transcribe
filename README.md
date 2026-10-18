@@ -5,7 +5,7 @@ Transcripts of recordings, as a deliverable, for [Hermes](https://github.com/Nou
 The agent asks the person which way first, and runs only that one:
 
 - **Local:** transcribed with whisper on the agent's machine, free. The agent also sees the text, so it can answer questions about it.
-- **Papa Reo:** the original audio goes to [Papa Reo](https://papareo.io), Te Hiku Media's speech recognition for te reo Māori and NZ English; whisper doesn't run. The transcript goes straight into an [ovenmitt](https://github.com/utunga/oven-mitt) vault and arrives in the chat as an attachment. **It never enters the model's context**, because Papa Reo outputs are licensed under the [Kaitiakitanga License](https://github.com/TeHikuMedia/Kaitiakitanga-License/blob/tumu/papareo_api.md), whose clause 3 forbids sending them to services that may collect and use them. <!-- FIXME: move this utunga/ URL to cyborg-garden/oven-mitt as soon as that is fixed -->
+- **Papa Reo:** the original audio goes to [Papa Reo](https://papareo.io), Te Hiku Media's speech recognition for te reo Māori and NZ English; whisper doesn't run. The transcript goes straight into an [ovenmitt](https://github.com/utunga/oven-mitt) vault and arrives in the chat as an attachment. **It never enters the model's context**, because Papa Reo outputs are licensed under the [Kaitiakitanga License](https://papareo.io/kaitiakitanga), whose clause 3 forbids sending them to services that may collect and use them. <!-- FIXME: move this utunga/ URL to cyborg-garden/oven-mitt as soon as that is fixed -->
 
 **Automatic detection** ("may this recording contain te reo Māori?") is its own project, [may_contain_mi](https://github.com/utunga/may_contain_mi), split out on 2026-10-18. It will come back later as a dependency, plugged into `transcribe.Deps.detect`, and bring back `engine="auto"`; until then `auto` is refused with "ask the person first", and this project has no dependency on it. <!-- FIXME: confirm the may_contain_mi URL once the repo exists -->
 
@@ -22,6 +22,8 @@ transcribe_recording(path, engine)          the agent asked the person first
                    → Papa Reo on the original audio → plain text + footer → vault → handle
                    → ovenmitt_vault_send → this chat; the agent gets only the handle
 ```
+
+**Kaitiakitanga-compliant agents.** If the operator declares the agent compliant with the [Kaitiakitanga License](https://papareo.io/kaitiakitanga) (Swarm Map's Transcription card sets `PAPAREO_KAITIAKITANGA_COMPLIANT=1` and a line in the agent's SOUL.md), a Papa Reo result also carries the `text`, so the agent can help with it on request. Only for agents whose models don't keep or learn from what they read; the text is still never logged.
 
 Every transcript says what made it: a local one ends "Transcribed by whisper large-v3-turbo, run locally." (and its caption says so), a Papa Reo one ends with the footer below, and the tool result carries `transcribed_by` for the agent to pass on. The agent says the file is attached and doesn't summarise or translate it unless asked.
 

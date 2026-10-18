@@ -28,7 +28,7 @@ import sys  # noqa: E402
 from typing import Any  # noqa: E402
 
 from . import deliver, transcribe  # noqa: E402
-from .local import LocalWhisper, probe_duration  # noqa: E402
+from .local import LocalWhisper, has_audio, probe_duration  # noqa: E402
 from .papareo import PapareoClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,7 @@ KEY_ENV = "PAPAREO_API_KEY"
 SOCKET_ENV = "OVENMITT_SOCKET"
 DEFAULT_SOCKET = "/run/ovenmitt/ovenmitt.sock"
 SEND_TOOL = "ovenmitt_vault_send"
+COMPLIANT_ENV = "PAPAREO_KAITIAKITANGA_COMPLIANT"
 
 SCHEMA: dict[str, Any] = {
     "name": "transcribe_recording",
@@ -99,6 +100,9 @@ def register(ctx: Any) -> None:
     papareo = PapareoClient(_POPPED_KEY)
     socket_path = os.environ.get(SOCKET_ENV) or DEFAULT_SOCKET
     whisper = LocalWhisper()
+    # Set by Swarm Map when the operator declares this agent compliant with
+    # the Kaitiakitanga License. Not a secret, so not popped.
+    compliant = os.environ.get(COMPLIANT_ENV) == "1"
     vault_client: list[Any] = []
 
     def vault() -> Any:
@@ -118,6 +122,8 @@ def register(ctx: Any) -> None:
     deps = transcribe.Deps(
         local=whisper.transcribe,
         duration=probe_duration,
+        is_audio=has_audio,
+        share_papareo_text=compliant,
         papareo=papareo,
         vault=vault,
         send_local=deliver.send_local,
@@ -146,3 +152,5 @@ def register(ctx: Any) -> None:
         __version__,
         "ready" if papareo.configured else papareo.why_not(),
     )
+    if compliant:
+        logger.info("papareo_transcribe: declared Kaitiakitanga-compliant; Papa Reo text is returned to the agent")
