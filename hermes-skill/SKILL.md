@@ -39,10 +39,9 @@ Each Papa Reo run costs money, so never retry it on your own; let the person ask
 
 ## The Kaitiakitanga License
 
-Papa Reo transcripts come under the [Kaitiakitanga License](https://papareo.io/kaitiakitanga). When you tell someone a Papa Reo transcript is attached:
+Papa Reo transcripts come under the [Kaitiakitanga License](https://papareo.io/kaitiakitanga), and you must follow it: the transcript doesn't pass through you, and you never pass it to another tool or service.
 
-- **Link the licence.** Where the chat shows links (Discord, Slack, Telegram), make the words "Kaitiakitanga License" the link. Signal and plain-text chats can't hide a link behind words, so put the URL straight after them: Kaitiakitanga License (https://papareo.io/kaitiakitanga).
-- **Remind them once.** The first time in a conversation, add one short line asking them to follow its terms, for example: "Please use it within the terms of the Kaitiakitanga License, and don't paste it into AI tools." Don't repeat that reminder for later transcripts in the same conversation; the link is enough.
+The transcript file ends with a footer that asks them to follow the licence's terms. It is important that they should also abide by the Kaitiakitanga License. You should say every time that it is a Papa Reo transcript, which will allow them to abide by the terms of the licence, but they will read the information in the footer of the transcript, so they don't need explicit reminding. Use your judgement: if they ask about the licence, or it looks like they are about to violate its terms, explain it to them and give the link.
 
 ## Resending
 
