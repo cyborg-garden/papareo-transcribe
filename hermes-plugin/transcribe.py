@@ -76,6 +76,12 @@ class Deps:
     # The operator declared this agent compliant with the Kaitiakitanga
     # License, so Papa Reo text may be returned to it.
     share_papareo_text: bool = False
+    # Platforms where, without an ovenmitt vault, the plugin may attach a Papa
+    # Reo transcript to the chat itself (PAPAREO_DIRECT_PLATFORMS). The
+    # operator's call that the platform itself is a fit for the licence (e.g.
+    # Signal: end-to-end encrypted, no server copy). The text still never
+    # reaches the model unless share_papareo_text is set.
+    direct_platforms: frozenset[str] = frozenset()
     # (text, whisper language) -> Decision. None until may_contain_mi is
     # wired in; until then engine="auto" is refused (ask the person instead).
     detect: Callable[[str, str], Decision] | None = None
@@ -180,6 +186,9 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
         reasons = ("asked",)
 
     why_not = preflight(deps)
+    direct = bool(why_not) and _direct_ok(deps)
+    if direct:
+        why_not = None
     if why_not:
         logger.info("papareo_transcribe: escalation skipped before any spend: %s", why_not)
         return _fallback(local, filename, f"Papa Reo wasn't used, and nothing was spent: {why_not}.", deps)
@@ -200,6 +209,8 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
     body = with_footer(text)
     shared = text.strip() if deps.share_papareo_text else None
     del text
+    if direct:
+        return _deliver_direct(body, filename, reasons, shared, deps)
     try:
         info = deps.vault().put(
             body, VAULT, name=filename, mime="text/plain; charset=utf-8", labels=[filename]
@@ -263,6 +274,63 @@ NEXT_PAPAREO = (
     "licence, or look about to break its terms, explain it and give the link as a plain URL, "
     "https://papareo.io/kaitiakitanga. Don't repeat, summarise or save the text unless they ask."
 )
+
+
+NEXT_PAPAREO_DIRECT = (
+    "The file has already been sent to this chat: don't send it again. In one short message, say it's "
+    "attached and that it's a Papa Reo transcript. The file's footer asks them to follow the Kaitiakitanga "
+    "License, so they don't need an explicit reminder; but if they ask about the licence, or look about to "
+    "break its terms, explain it and give the link as a plain URL, https://papareo.io/kaitiakitanga. Don't "
+    "repeat, summarise or save the text unless they ask."
+)
+
+
+def _direct_ok(deps: Deps) -> bool:
+    """No vault, but the operator allows attaching Papa Reo files directly on
+    this chat's platform, and the key is there."""
+    if not deps.direct_platforms or not deps.papareo.configured:
+        return False
+    try:
+        platform = deps.platform()
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(platform) and platform in deps.direct_platforms
+
+
+def _deliver_direct(
+    body: bytes, filename: str, reasons: tuple[str, ...], shared: str | None, deps: Deps
+) -> dict[str, Any]:
+    """Attach the Papa Reo transcript to this chat with the chat's own
+    adapter; nothing is kept. The text goes to the model only when shared."""
+    try:
+        deps.send_local(filename, body.decode("utf-8"), _caption(PAPAREO_SOURCE))
+    except Exception as e:  # noqa: BLE001
+        # Only the type: an adapter's message could echo what it was sent.
+        logger.warning("papareo_transcribe: couldn't attach the Papa Reo transcript: %s", type(e).__name__)
+        return {
+            "sent": False,
+            "engine": "papareo",
+            "delivery": "direct",
+            "filename": filename,
+            "papareo_charged": True,
+            "note": (
+                "Papa Reo transcribed it (that was paid for), but the file couldn't be attached to this chat, "
+                "and no copy was kept. Ask before running Papa Reo again."
+            ),
+            **_shared(shared),
+        }
+    finally:
+        del body
+    logger.info("papareo_transcribe: Papa Reo transcript attached directly (%s)", ",".join(reasons))
+    return {
+        "sent": True,
+        "engine": "papareo",
+        "delivery": "direct",
+        "transcribed_by": PAPAREO_SOURCE,
+        "filename": filename,
+        **_shared(shared),
+        "next": NEXT_PAPAREO_DIRECT,
+    }
 
 
 def _shared(text: str | None) -> dict[str, Any]:

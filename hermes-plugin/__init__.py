@@ -33,13 +33,16 @@ from .papareo import PapareoClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.2.9"
+__version__ = "0.3.0"
 
 KEY_ENV = "PAPAREO_API_KEY"
 SOCKET_ENV = "OVENMITT_SOCKET"
 DEFAULT_SOCKET = "/run/ovenmitt/ovenmitt.sock"
 SEND_TOOL = "ovenmitt_vault_send"
 COMPLIANT_ENV = "PAPAREO_KAITIAKITANGA_COMPLIANT"
+# Comma-separated platforms where, with no ovenmitt vault, Papa Reo
+# transcripts are attached to the chat directly (e.g. "signal"). Not a secret.
+DIRECT_ENV = "PAPAREO_DIRECT_PLATFORMS"
 
 SCHEMA: dict[str, Any] = {
     "name": "transcribe_recording",
@@ -49,8 +52,8 @@ SCHEMA: dict[str, Any] = {
         "already said, and set chosen_by_person=true only when the person picked it: otherwise "
         "nothing runs. engine='local': whisper on this machine, free, and you get the text back. "
         "engine='papareo': Papa Reo, Te Hiku Media's speech recognition for te reo Māori, a paid "
-        "call; you get only a handle, because the transcript is protected and you must not try to "
-        "read it."
+        "call; the transcript is protected: you get only a handle (or nothing), and you must not try "
+        "to read it."
     ),
     "parameters": {
         "type": "object",
@@ -109,6 +112,7 @@ def register(ctx: Any) -> None:
     # Set by Swarm Map when the operator declares this agent compliant with
     # the Kaitiakitanga License. Not a secret, so not popped.
     compliant = os.environ.get(COMPLIANT_ENV) == "1"
+    direct = frozenset(p.strip().lower() for p in (os.environ.get(DIRECT_ENV) or "").split(",") if p.strip())
     vault_client: list[Any] = []
 
     def vault() -> Any:
@@ -130,6 +134,7 @@ def register(ctx: Any) -> None:
         duration=probe_duration,
         is_audio=has_audio,
         share_papareo_text=compliant,
+        direct_platforms=direct,
         papareo=papareo,
         vault=vault,
         send_local=deliver.send_local,
@@ -159,5 +164,7 @@ def register(ctx: Any) -> None:
         __version__,
         "ready" if papareo.configured else papareo.why_not(),
     )
+    if direct:
+        logger.info("papareo_transcribe: Papa Reo files may be attached directly on: %s", ",".join(sorted(direct)))
     if compliant:
         logger.info("papareo_transcribe: declared Kaitiakitanga-compliant; Papa Reo text is returned to the agent")
