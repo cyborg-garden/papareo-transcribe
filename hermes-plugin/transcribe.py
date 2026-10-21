@@ -258,10 +258,10 @@ NEXT_LOCAL = (
 )
 NEXT_PAPAREO = (
     "The file has already been sent to this chat: don't send it again (no ovenmitt_vault_send). In one "
-    "short message, say it's attached and that Papa Reo made it, and give the Kaitiakitanga License link "
-    "as a plain URL, https://papareo.io/kaitiakitanga (chats like Signal don't show markdown links); the "
-    "first time in this conversation, ask them to use it within its terms. Don't repeat, summarise or "
-    "save the text unless they ask."
+    "short message, say it's attached and that it's a Papa Reo transcript. The file's footer asks them to "
+    "follow the Kaitiakitanga License, so they don't need an explicit reminder; but if they ask about the "
+    "licence, or look about to break its terms, explain it and give the link as a plain URL, "
+    "https://papareo.io/kaitiakitanga. Don't repeat, summarise or save the text unless they ask."
 )
 
 

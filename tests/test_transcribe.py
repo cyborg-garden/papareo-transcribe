@@ -185,7 +185,10 @@ def test_flagged_recording_goes_to_papareo_vault_and_bridge(plugin, memo):
     r = w.run(memo)
     assert r == {"sent": True, "engine": "papareo", "transcribed_by": "Papa Reo, Te Hiku Media",
                  "handle": "v_0123456789ab", "filename": FILENAME, "next": plugin.transcribe.NEXT_PAPAREO}
-    assert "https://papareo.io/kaitiakitanga" in r["next"]
+    # The footer is the licence notice; the agent names Papa Reo every time and
+    # explains the licence only when it's asked about or about to be broken.
+    assert "Papa Reo transcript" in r["next"]
+    assert "don't need an explicit reminder" in r["next"]
     assert w.papareo.calls == 1
     [put] = w.vault_.puts
     assert put["vault"] == "papareo"
