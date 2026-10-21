@@ -1,0 +1,78 @@
+name: sanitization
+
+# Gate what papareo-transcribe ships to agents (hermes-plugin/, hermes-skill/) and its docs
+# so they never carry secrets, PII, or use-case-specific particulars — even from
+# an automated contribution. Ported from oven-mitt's gate. Two layers, both required, fail-closed: a
+# deterministic secret/PII layer (no key needed) plus an LLM particulars layer.
+#
+# Scope differs by trigger:
+#   * pull_request → DIFF-ONLY. Scans only files changed across the full PR range
+#     (git diff --name-only origin/tumu...HEAD). Keeps the gate from flaky-blocking
+#     contributors on pre-existing, untouched content.
+#   * push: tumu   → FULL-TREE (--all). Publish-time backstop.
+on:
+  pull_request:
+    paths:
+      - 'hermes-plugin/**'
+      - 'hermes-skill/**'
+      - 'docker/example/**'
+      - 'docs/**'
+      - '**/*.md'
+      - 'SOUL*'
+      - '**/SOUL*'
+      - 'scripts/check_sanitization.py'
+      - 'scripts/test_check_sanitization.py'
+      - '.github/workflows/sanitization.yml'
+  push:
+    branches: [tumu]
+
+jobs:
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the three-dot PR-range diff has a merge-base to work from.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install scanner deps
+        run: pip install -r scripts/requirements.txt
+      - name: Scanner self-tests
+        run: python -m pytest scripts/test_check_sanitization.py -q
+      - name: Determine scan scope
+        id: scope
+        # PRs scan only their own diff; push:tumu scans the whole shipped tree.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin tumu --quiet
+            echo "mode=--diff" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=--all" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Secrets & PII gate (deterministic — always enforced, no key needed)
+        run: python scripts/check_sanitization.py ${{ steps.scope.outputs.mode }} --deterministic-only
+      - name: Particulars gate (semantic — needs OPENROUTER_API_KEY, fails closed)
+        # Catches use-case-specific names / orgs / case IDs. Until the repo secret
+        # OPENROUTER_API_KEY is set, this step fails closed (the message says so) —
+        # distinct from the deterministic step above, so a red here means "set the
+        # key", a red above means "a secret/PII leak was found".
+        #
+        # Runs for push:tumu and same-repo PRs. Fork PRs never receive secrets,
+        # so there it is skipped (next step explains) instead of failing on a
+        # key the contributor cannot provide. Fork detection compares repo names
+        # from the event payload — nothing the PR author can set from a title or
+        # branch name. The deterministic layer above is never skipped.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          SANITIZE_BASE_REF: origin/tumu
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python scripts/check_sanitization.py ${{ steps.scope.outputs.mode }}
+      - name: Particulars gate skipped (fork PR — no secrets)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          msg="Particulars gate (semantic) SKIPPED: fork PRs get no repository secrets, so OPENROUTER_API_KEY is unavailable. The deterministic secrets/PII gate above DID run. A maintainer should run 'python scripts/check_sanitization.py --diff' locally before merging; the full-tree semantic scan also runs on push to tumu."
+          echo "::notice title=Particulars gate skipped::$msg"
+          echo "### Particulars gate skipped (fork PR)" >> "$GITHUB_STEP_SUMMARY"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
