@@ -68,8 +68,10 @@ class World:
     def __init__(self, plugin, *, text="Just a quick English note about Thursday.", language="en",
                  escalate=None, papareo=None, vault=None, bridge=True, platform="signal",
                  send_result=None, local_fails=False, detector_fails=False, is_audio=None,
-                 compliant=False):
+                 compliant=False, direct=(), local_send_fails=False):
         self.plugin = plugin
+        self.direct = frozenset(direct)
+        self.local_send_fails = local_send_fails
         self.local_sent: list[tuple] = []
         self.handle_sent: list[tuple] = []
         self.papareo = papareo or FakePapareo()
@@ -110,7 +112,8 @@ class World:
             detect=None if no_detector else detect,
             papareo=self.papareo,
             vault=lambda: self.vault_,
-            send_local=lambda f, t, c: self.local_sent.append((f, t, c)),
+            send_local=self._send_local,
+            direct_platforms=self.direct,
             send_handle=lambda h, f, c: (self.handle_sent.append((h, f, c)), self.send_result)[1],
             platform=lambda: self.platform_,
             bridge_problem=lambda: (
@@ -121,6 +124,11 @@ class World:
             now=lambda: datetime(2026, 10, 16, 15, 30),
             filename_for=lambda path, when: FILENAME,
         )
+
+    def _send_local(self, f, t, c):
+        if self.local_send_fails:
+            raise RuntimeError("adapter refused")
+        self.local_sent.append((f, t, c))
 
     def run(self, path, engine="auto"):
         return self.plugin.transcribe.run(str(path), engine, self.deps())
@@ -407,3 +415,56 @@ def test_nothing_runs_unless_the_person_chose(plugin, memo):
         r = plugin.transcribe.run(str(memo), engine, w.deps(), chosen_by_person=False)
         assert r["sent"] is False and r["error"].startswith("Nothing was transcribed. Ask the person first")
         assert w.local_calls == 0 and w.papareo.calls == 0 and w.local_sent == []
+
+
+# --- direct delivery: no ovenmitt, the plugin attaches the file itself -------
+
+
+def test_direct_platform_sends_papareo_file_without_ovenmitt(plugin, memo):
+    w = World(plugin, bridge=False, vault=FakeVault(up=False), direct=("signal",))
+    r = w.run(memo, engine="papareo")
+    assert r == {"sent": True, "engine": "papareo", "delivery": "direct",
+                 "transcribed_by": "Papa Reo, Te Hiku Media", "filename": FILENAME,
+                 "next": plugin.transcribe.NEXT_PAPAREO_DIRECT}
+    assert_no_papareo_text(r, w)
+    assert w.vault_.puts == [] and w.handle_sent == [] and w.local_calls == 0
+    [(fname, body, caption)] = w.local_sent
+    assert fname == FILENAME and caption == "Transcript (Papa Reo, Te Hiku Media)"
+    assert body.startswith(w.papareo.text)
+    assert "Kaitiakitanga license" in body and body.rstrip().endswith("Kaitiakitanga License.")
+
+
+def test_direct_only_on_listed_platforms(plugin, memo):
+    w = World(plugin, bridge=False, platform="discord", direct=("signal",))
+    r = w.run(memo, engine="papareo")
+    assert r["engine"] == "none" and "nothing was spent" in r["note"]
+    assert w.papareo.calls == 0 and w.local_sent == []
+
+
+def test_direct_still_needs_the_key(plugin, memo):
+    w = World(plugin, bridge=False, papareo=FakePapareo(configured=False), direct=("signal",))
+    r = w.run(memo, engine="papareo")
+    assert "no Papa Reo key" in r["note"] and w.papareo.calls == 0
+
+
+def test_direct_shares_text_only_when_compliant(plugin, memo):
+    w = World(plugin, bridge=False, direct=("signal",), compliant=True)
+    r = w.run(memo, engine="papareo")
+    assert r["text"] == w.papareo.text.strip() and r["kaitiakitanga_compliant"] is True
+
+
+def test_direct_send_failure_says_it_was_paid_and_keeps_no_copy(plugin, memo, caplog):
+    w = World(plugin, bridge=False, direct=("signal",), local_send_fails=True)
+    with caplog.at_level(logging.DEBUG):
+        r = w.run(memo, engine="papareo")
+    assert r["sent"] is False and r["papareo_charged"] is True and r["delivery"] == "direct"
+    assert "couldn't be attached" in r["note"]
+    assert_no_papareo_text(r, w)
+    assert w.papareo.text not in caplog.text
+
+
+def test_ovenmitt_wins_when_both_are_available(plugin, memo):
+    w = World(plugin, direct=("signal",))
+    r = w.run(memo, engine="papareo")
+    assert r["handle"] == "v_0123456789ab" and "delivery" not in r
+    assert w.local_sent == []

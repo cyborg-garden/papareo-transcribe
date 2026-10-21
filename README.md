@@ -47,6 +47,10 @@ tests/
 
 Install both directories, each pinned to a tag (`git:cyborg-garden/papareo-transcribe#<tag>:hermes-plugin` and `…:hermes-skill`), alongside the ovenmitt bridge plugin and skill.
 
+## Without ovenmitt: direct delivery
+
+Set `PAPAREO_DIRECT_PLATFORMS` (comma-separated, e.g. `signal`) and, when there is no ovenmitt vault for the chat, the plugin attaches the Papa Reo transcript (with its footer) to the chat itself, the same way a local transcript goes out, and keeps no copy. The text still never reaches the model unless the agent is declared Kaitiakitanga-compliant. Listing a platform is the operator's call that the platform is a fit for the licence: Signal is end-to-end encrypted and keeps no server copy; platforms that can read message content (Discord, Slack) are better left off. When a vault is set up for the chat, it wins.
+
 ## What the agent needs
 
 - The `ovenmitt_bridge` plugin and an ovenmitt daemon with a vault named `papareo`, holding a `send` destination named after each platform that may receive transcripts (`match = "<platform>/*"`, or one chat). Swarm Map's Transcription card adds the vault.
