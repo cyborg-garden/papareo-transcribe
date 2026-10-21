@@ -33,7 +33,7 @@ from .papareo import PapareoClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.1.0"
+__version__ = "0.2.9"
 
 KEY_ENV = "PAPAREO_API_KEY"
 SOCKET_ENV = "OVENMITT_SOCKET"

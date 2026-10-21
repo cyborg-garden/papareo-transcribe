@@ -103,7 +103,7 @@ wheels = [
 
 [[package]]
 name = "papareo-transcribe"
-version = "0.1.0"
+version = "0.2.9"
 source = { virtual = "." }
 
 [package.optional-dependencies]

@@ -1,5 +1,5 @@
 name: papareo_transcribe
-version: 0.1.0
+version: 0.2.9
 description: >-
   Transcripts of recordings as a deliverable; the agent asks the person
   which engine first. engine=local runs whisper (large-v3-turbo) and sends

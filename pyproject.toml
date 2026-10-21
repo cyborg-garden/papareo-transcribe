@@ -1,6 +1,6 @@
 [project]
 name = "papareo-transcribe"
-version = "0.1.0"
+version = "0.2.9"
 description = "Transcripts of recordings for Hermes agents, escalated to Papa Reo (te reo Maori) on request."
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"
