@@ -1,5 +1,10 @@
 """Fetch a recording from a share link, into a temp dir the caller removes.
 
+The download runs in a process of its own, with no keys in its environment. A
+server that drips bytes can hold a read open for as long as it likes, and only a
+process can be stopped for certain when the time is up. This file is that process
+as well, so it imports nothing from the plugin.
+
 Handles direct links, Google Drive, Dropbox and OneDrive/SharePoint file links.
 A link that needs a login, or a folder link, ends up at a web page, which is
 refused rather than transcribed. Messages never repeat the link: share links
@@ -10,10 +15,13 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import json
 import logging
+import os
 import re
 import socket
-import threading
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
@@ -25,10 +33,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 MAX_BYTES = 100 * 1024 * 1024
 MAX_SECONDS = 20 * 60.0
-_SLOTS = threading.BoundedSemaphore(3)
 MAX_REDIRECTS = 8
 TIMEOUT_S = 120.0
 TOO_LONG = "that link took too long to download"
+UNREACHABLE = "that link couldn't be reached"
 NEEDS_LINK = (
     "that link didn't give me an audio file. It may need a login, or point at a folder. "
     "Ask for a link to one file, shared as 'anyone with the link can view', or for the file itself"
@@ -116,11 +124,9 @@ def _extension(response: httpx.Response, url: str) -> str:
 
 
 def _download(
-    client: httpx.Client, url: str, dest_dir: Path, max_bytes: int, resolve: Callable[..., list], stop: threading.Event
+    client: httpx.Client, url: str, dest_dir: Path, max_bytes: int, resolve: Callable[..., list]
 ) -> Path | None:
     for _ in range(MAX_REDIRECTS):
-        if stop.is_set():
-            raise FetchError(TOO_LONG)
         _check(url, resolve)
         with client.stream("GET", url) as r:
             if r.is_redirect and r.headers.get("location"):
@@ -140,8 +146,6 @@ def _download(
                     total += len(chunk)
                     if total > max_bytes:
                         raise FetchError("that recording is too large")
-                    if stop.is_set():
-                        raise FetchError(TOO_LONG)
                     f.write(chunk)
             if not total or first.startswith((b"<!doctype", b"<html")):
                 target.unlink(missing_ok=True)
@@ -150,19 +154,24 @@ def _download(
     raise FetchError("that link redirected too many times")
 
 
-def _fetch_all(
-    url: str, dest_dir: str, max_bytes: int, transport: httpx.BaseTransport | None, resolve: Callable[..., list],
-    stop: threading.Event,
+def download(
+    url: str,
+    dest_dir: str,
+    *,
+    max_bytes: int = MAX_BYTES,
+    transport: httpx.BaseTransport | None = None,
+    resolve: Callable[..., list] = socket.getaddrinfo,
 ) -> str:
+    """The download itself. Call fetch(), which puts a time limit on this."""
     try:
         # trust_env off: a proxy in the environment must not see the link.
         with httpx.Client(timeout=TIMEOUT_S, follow_redirects=False, transport=transport, trust_env=False) as client:
             for candidate in candidates(url.strip()):
-                got = _download(client, candidate, Path(dest_dir), max_bytes, resolve, stop)
+                got = _download(client, candidate, Path(dest_dir), max_bytes, resolve)
                 if got:
                     return str(got)
     except httpx.HTTPError as e:
-        raise FetchError("that link couldn't be reached") from e
+        raise FetchError(UNREACHABLE) from e
     except (httpx.InvalidURL, ValueError) as e:  # UnicodeError is a ValueError
         raise FetchError("that link doesn't look right") from e
     raise FetchError(NEEDS_LINK)
@@ -172,42 +181,45 @@ def fetch(
     url: str,
     dest_dir: str,
     *,
-    max_bytes: int = MAX_BYTES,
     max_seconds: float = MAX_SECONDS,
-    transport: httpx.BaseTransport | None = None,
-    resolve: Callable[..., list] = socket.getaddrinfo,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> str:
-    """Timeouts only bound one read, so a server dripping bytes or headers could
-    hold a call for hours. Only a separate thread gives a real limit. A thread that
-    overruns stays until its next read returns or times out: closing its socket from
-    here is unsafe, since the number can be reused by another connection. So only a
-    few may exist at once."""
-    if not _SLOTS.acquire(blocking=False):
-        raise FetchError("too many links are downloading right now; try again shortly")
-    stop = threading.Event()
-    outcome: dict[str, object] = {}
-
-    def work() -> None:
-        try:
-            outcome["path"] = _fetch_all(url, dest_dir, max_bytes, transport, resolve, stop)
-        except Exception as e:  # noqa: BLE001 - carried back to the caller
-            outcome["error"] = e
-        finally:
-            _SLOTS.release()
-
-    thread = threading.Thread(target=work, daemon=True, name="papareo-fetch")
+    """Download in a separate process, and stop it for certain at the time limit.
+    The link goes in on stdin: on a command line, anyone could read it."""
     try:
-        thread.start()
-    except RuntimeError as e:
-        _SLOTS.release()
-        raise FetchError("that link couldn't be reached") from e
-    thread.join(max_seconds)
-    if thread.is_alive():
-        stop.set()
-        raise FetchError(TOO_LONG)
-    error = outcome.get("error")
-    if isinstance(error, FetchError):
-        raise error
-    if error is not None or "path" not in outcome:
-        raise FetchError("that link couldn't be reached")
-    return str(outcome["path"])
+        done = run(
+            [sys.executable, "-I", os.path.abspath(__file__)],
+            input=json.dumps({"url": url, "dest": dest_dir}).encode(),
+            capture_output=True,
+            timeout=max_seconds,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": dest_dir},
+        )
+    except subprocess.TimeoutExpired as e:
+        raise FetchError(TOO_LONG) from e
+    except OSError as e:
+        raise FetchError(UNREACHABLE) from e
+    try:
+        answer = json.loads(done.stdout)
+        path, error = answer.get("path"), answer.get("error")
+    except (ValueError, AttributeError) as e:
+        raise FetchError(UNREACHABLE) from e
+    if isinstance(error, str) and error:
+        raise FetchError(error)
+    if isinstance(path, str) and Path(path).resolve().parent == Path(dest_dir).resolve():
+        return path
+    raise FetchError(UNREACHABLE)
+
+
+def main() -> None:
+    try:
+        request = json.load(sys.stdin)
+        answer = {"path": download(request["url"], request["dest"])}
+    except FetchError as e:
+        answer = {"error": str(e)}
+    except Exception:  # noqa: BLE001 - its message could repeat the link
+        answer = {"error": UNREACHABLE}
+    json.dump(answer, sys.stdout)
+
+
+if __name__ == "__main__":
+    main()

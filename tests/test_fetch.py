@@ -46,7 +46,7 @@ def test_onedrive_falls_through_to_the_second_way(f, tmp_path):
             return httpx.Response(401)
         return httpx.Response(200, headers={"content-type": "audio/mp4"}, content=b"audio")
 
-    path = f.fetch("https://1drv.ms/u/s!AbC", str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
+    path = f.download("https://1drv.ms/u/s!AbC", str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
     assert Path(path).read_bytes() == b"audio"
 
 
@@ -59,7 +59,7 @@ def test_redirects_are_followed_and_named(f, tmp_path):
             content=b"audio",
         )
 
-    path = f.fetch("https://example.org/start", str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
+    path = f.download("https://example.org/start", str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
     assert Path(path).name == "recording.m4a"
 
 
@@ -70,14 +70,14 @@ def test_redirects_are_followed_and_named(f, tmp_path):
 ])
 def test_login_pages_are_refused_and_never_kept(f, tmp_path, response):
     with pytest.raises(f.FetchError, match="anyone with the link"):
-        f.fetch("https://example.org/a.mp3", str(tmp_path), transport=httpx.MockTransport(lambda r: response), resolve=public)
+        f.download("https://example.org/a.mp3", str(tmp_path), transport=httpx.MockTransport(lambda r: response), resolve=public)
     assert list(tmp_path.iterdir()) == []
 
 
 def test_private_addresses_are_refused(f, tmp_path):
     transport = httpx.MockTransport(lambda r: pytest.fail("must not connect"))
     with pytest.raises(f.FetchError, match="public address"):
-        f.fetch("https://intranet.example/a.mp3", str(tmp_path), transport=transport, resolve=private)
+        f.download("https://intranet.example/a.mp3", str(tmp_path), transport=transport, resolve=private)
 
 
 def test_redirect_to_a_private_address_is_refused(f, tmp_path):
@@ -88,19 +88,19 @@ def test_redirect_to_a_private_address_is_refused(f, tmp_path):
         return private(host, port) if host == "inner.example" else public(host, port)
 
     with pytest.raises(f.FetchError, match="public address"):
-        f.fetch("https://example.org/a", str(tmp_path), transport=httpx.MockTransport(handler), resolve=resolve)
+        f.download("https://example.org/a", str(tmp_path), transport=httpx.MockTransport(handler), resolve=resolve)
 
 
 @pytest.mark.parametrize("url", ["http://example.org/a.mp3", "file:///etc/passwd", "ftp://example.org/a"])
 def test_only_https(f, tmp_path, url):
     with pytest.raises(f.FetchError, match="only https"):
-        f.fetch(url, str(tmp_path), resolve=public)
+        f.download(url, str(tmp_path), resolve=public)
 
 
 def test_too_large(f, tmp_path):
     handler = lambda r: httpx.Response(200, headers={"content-type": "audio/mp4"}, content=b"x" * 100)  # noqa: E731
     with pytest.raises(f.FetchError, match="too large"):
-        f.fetch("https://example.org/a.mp3", str(tmp_path), max_bytes=10, transport=httpx.MockTransport(handler), resolve=public)
+        f.download("https://example.org/a.mp3", str(tmp_path), max_bytes=10, transport=httpx.MockTransport(handler), resolve=public)
 
 
 def test_errors_never_repeat_the_link(f, tmp_path):
@@ -110,7 +110,7 @@ def test_errors_never_repeat_the_link(f, tmp_path):
         raise httpx.ConnectError("boom " + secret)
 
     with pytest.raises(f.FetchError) as e:
-        f.fetch(secret, str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
+        f.download(secret, str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
     assert "SEKRET" not in str(e.value)
 
 
@@ -131,51 +131,20 @@ def test_public(f, address):
 def test_odd_links_are_a_clean_error(f, tmp_path, url):
     transport = httpx.MockTransport(lambda r: httpx.Response(200, content=b"x"))
     with pytest.raises(f.FetchError) as e:
-        f.fetch(url, str(tmp_path), transport=transport, resolve=public)
+        f.download(url, str(tmp_path), transport=transport, resolve=public)
     assert "a" * 70 not in str(e.value) and "pw" not in str(e.value)
 
 
 def test_redirect_to_a_broken_link_is_a_clean_error(f, tmp_path):
     transport = httpx.MockTransport(lambda r: httpx.Response(302, headers={"location": "https://[bad"}))
     with pytest.raises(f.FetchError):
-        f.fetch("https://example.org/a", str(tmp_path), transport=transport, resolve=public)
-
-
-def test_slow_headers_stop_at_the_deadline(f, tmp_path):
-    import threading
-    import time
-
-    release = threading.Event()
-
-    def handler(request):
-        release.wait(5)
-        return httpx.Response(200, headers={"content-type": "audio/mp4"}, content=b"x")
-
-    started = time.monotonic()
-    with pytest.raises(f.FetchError, match="too long"):
-        f.fetch("https://example.org/a.mp3", str(tmp_path), max_seconds=0.2, transport=httpx.MockTransport(handler), resolve=public)
-    release.set()
-    assert time.monotonic() - started < 2
-
-
-def test_a_drip_stops_writing_after_the_deadline(f, tmp_path):
-    import time
-
-    class Drip(httpx.SyncByteStream):
-        def __iter__(self):
-            for _ in range(200):
-                time.sleep(0.05)
-                yield b"x"
-
-    transport = httpx.MockTransport(lambda r: httpx.Response(200, headers={"content-type": "audio/mp4"}, stream=Drip()))
-    with pytest.raises(f.FetchError, match="too long"):
-        f.fetch("https://example.org/a.mp3", str(tmp_path), max_seconds=0.2, transport=transport, resolve=public)
+        f.download("https://example.org/a", str(tmp_path), transport=transport, resolve=public)
 
 
 def test_a_served_playlist_name_is_not_kept(f, tmp_path):
     headers = {"content-type": "application/octet-stream", "content-disposition": 'attachment; filename="a.m3u8"'}
     transport = httpx.MockTransport(lambda r: httpx.Response(200, headers=headers, content=b"#EXTM3U"))
-    path = f.fetch("https://example.org/x", str(tmp_path), transport=transport, resolve=public)
+    path = f.download("https://example.org/x", str(tmp_path), transport=transport, resolve=public)
     assert Path(path).name == "recording"
 
 
@@ -187,28 +156,48 @@ def test_drive_keeps_the_resource_key_and_account_paths(f):
 def test_a_label_too_long_to_resolve_is_a_clean_error(f, tmp_path):
     host = "a" * 70 + ".org"
     with pytest.raises(f.FetchError) as e:
-        f.fetch(f"https://{host}/x", str(tmp_path))  # the real resolver
+        f.download(f"https://{host}/x", str(tmp_path))  # the real resolver
     assert host not in str(e.value)
 
 
-def test_only_a_few_downloads_at_once_and_slots_come_back(f, tmp_path):
-    import threading
+def test_a_stuck_download_is_stopped_for_certain(f, tmp_path):
+    import subprocess
+    import sys
+    import time
 
-    release = threading.Event()
+    def stuck(cmd, **kw):
+        return subprocess.run([sys.executable, "-c", "import time; time.sleep(30)"], **kw)
 
-    def handler(request):
-        release.wait(5)
-        return httpx.Response(200, headers={"content-type": "audio/mp4"}, content=b"x")
+    started = time.monotonic()
+    with pytest.raises(f.FetchError, match="too long"):
+        f.fetch("https://example.org/a.mp3", str(tmp_path), max_seconds=0.3, run=stuck)
+    assert time.monotonic() - started < 5
 
-    transport = httpx.MockTransport(handler)
-    for _ in range(3):
-        with pytest.raises(f.FetchError, match="too long"):
-            f.fetch("https://example.org/a.mp3", str(tmp_path), max_seconds=0.01, transport=transport, resolve=public)
-    with pytest.raises(f.FetchError, match="too many"):
-        f.fetch("https://example.org/a.mp3", str(tmp_path), max_seconds=0.01, transport=transport, resolve=public)
-    release.set()
-    for _ in range(200):
-        if f._SLOTS.acquire(timeout=0.05):
-            f._SLOTS.release()
-            break
-    assert f.fetch("https://example.org/a.mp3", str(tmp_path), transport=httpx.MockTransport(lambda r: httpx.Response(200, headers={"content-type": "audio/mp4"}, content=b"x")), resolve=public)
+
+def test_the_real_process_returns_its_refusal(f, tmp_path):
+    with pytest.raises(f.FetchError, match="only https"):
+        f.fetch("http://example.org/a.mp3", str(tmp_path))
+
+
+def test_the_link_stays_off_the_command_line_and_keys_stay_home(f, tmp_path, monkeypatch):
+    import json
+    import subprocess
+
+    monkeypatch.setenv("PAPAREO_API_KEY", "must-not-travel")
+    seen = {}
+
+    def run(cmd, **kw):
+        seen.update(cmd=cmd, **kw)
+        target = tmp_path / "recording.mp3"
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"path": str(target)}).encode(), b"")
+
+    assert f.fetch("https://example.org/a.mp3?token=SEKRET", str(tmp_path), run=run).endswith("recording.mp3")
+    assert "SEKRET" not in " ".join(seen["cmd"]) and "PAPAREO_API_KEY" not in seen["env"]
+
+
+@pytest.mark.parametrize("stdout", [b"", b"not json", b"[]", b'{"path": "/etc/passwd"}', b"{}"])
+def test_a_confused_process_is_a_clean_error(f, tmp_path, stdout):
+    import subprocess
+
+    with pytest.raises(f.FetchError, match="couldn't be reached"):
+        f.fetch("https://example.org/a", str(tmp_path), run=lambda c, **k: subprocess.CompletedProcess(c, 1, stdout, b""))
