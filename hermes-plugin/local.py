@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .speakers import AUDIO_DEMUXERS, Cue
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "large-v3-turbo"
@@ -28,6 +30,8 @@ class LocalResult:
     duration: float
     # The whisper model that made it, e.g. "large-v3-turbo".
     model: str = ""
+    # Timed pieces, for paragraphs and speakers.
+    cues: tuple[Cue, ...] = ()
 
 
 def configured_model() -> str:
@@ -55,7 +59,7 @@ def decode(path: str) -> Any:
     import numpy as np
 
     proc = subprocess.run(
-        ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
+        ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-format_whitelist", AUDIO_DEMUXERS, "-i", path,
          "-f", "s16le", "-ac", "1", "-ar", "16000", "-"],
         capture_output=True,
         check=False,
@@ -83,7 +87,7 @@ def probe_duration(path: str) -> float | None:
     import subprocess
 
     proc = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path],
+        ["ffprobe", "-v", "error", "-format_whitelist", AUDIO_DEMUXERS, "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path],
         capture_output=True,
         text=True,
         check=False,
@@ -100,7 +104,7 @@ def has_audio(path: str) -> bool:
     import subprocess
 
     proc = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type",
+        ["ffprobe", "-v", "error", "-format_whitelist", AUDIO_DEMUXERS, "-select_streams", "a", "-show_entries", "stream=codec_type",
          "-of", "default=nw=1:nk=1", path],
         capture_output=True,
         text=True,
@@ -131,7 +135,8 @@ class LocalWhisper:
                 self._model = _load(name)
                 self._loaded_name = name
             segments, info = self._model.transcribe(audio, language=None, vad_filter=True, beam_size=5)
-            text = " ".join(s.text.strip() for s in segments).strip()
+            cues = tuple(Cue(float(s.start), float(s.end), s.text.strip()) for s in segments if s.text.strip())
+            text = " ".join(c.text for c in cues).strip()
             self._last_used = time.monotonic()
             self._arm_unload()
         return LocalResult(
@@ -140,6 +145,7 @@ class LocalWhisper:
             language_probability=float(getattr(info, "language_probability", 0.0) or 0.0),
             duration=float(getattr(info, "duration", 0.0) or 0.0),
             model=name,
+            cues=cues,
         )
 
     def _arm_unload(self) -> None:

@@ -51,6 +51,18 @@ Install both directories, each pinned to a tag (`git:cyborg-garden/papareo-trans
 
 Set `PAPAREO_DIRECT_PLATFORMS` (comma-separated, e.g. `signal`) and, when there is no ovenmitt vault for the chat, the plugin attaches the Papa Reo transcript (with its footer) to the chat itself, the same way a local transcript goes out, and keeps no copy. The text still never reaches the model unless the agent is declared Kaitiakitanga-compliant. Listing a platform is the operator's call that the platform is a fit for the licence: Signal is end-to-end encrypted and keeps no server copy; platforms that can read message content (Discord, Slack) are better left off. When a vault is set up for the chat, it wins.
 
+## Paragraphs, speakers and links
+
+Papa Reo transcripts are laid out from the timings in its JSON download, and local ones from whisper's segments: a new paragraph on a pause or when one runs long. This is arithmetic, so no model reads the text. The JSON must hold exactly the same words as the plain text; if not, or if there are no timings, the plain text goes out as it came. Papa Reo's SRT has finer timings but changes and drops words, so it only guides where a segment is split between speakers, and its text is never delivered.
+
+`speakers: true` adds labels like `[00:06] Speaker 2`. Separation runs on this machine with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), in its own process and environment, before any money is spent: if it fails, Papa Reo isn't called. Install it inside the container with `install_speakers.sh` from the plugin directory, which pins and hashes every download and adds about 110 MB under `/opt/data/papareo-speakers` (or `PAPAREO_SPEAKERS_HOME`). Accuracy on te reo Māori audio is untested, and the file says the labels may be wrong.
+
+The models are downloaded at install, not shipped here: pyannote segmentation 3.0 (MIT) and 3D-Speaker's CAM++ (the 3D-Speaker project is Apache-2.0), both from sherpa-onnx's releases (Apache-2.0).
+
+`voice_samples` names speakers from a short clip of each person, for people who have agreed. Each clip becomes numbers in the worker's memory for that one call, and is removed from the gateway's caches once separation has used it, whatever the outcome, so a retry needs the clip again. A clip in a call that stopped before separation is kept for the next try, and stays in the cache if that try never comes. **No voiceprint is ever stored.** Keeping one would need Te Hiku's and legal advice first, and would belong in its own opt-in plugin.
+
+`url` takes a share link to one file: direct, OneDrive/SharePoint, Google Drive or Dropbox, shared as "anyone with the link". Only public https addresses are fetched, and the copy is deleted after the call.
+
 ## What the agent needs
 
 - The `ovenmitt_bridge` plugin and an ovenmitt daemon with a vault named `papareo`, holding a `send` destination named after each platform that may receive transcripts (`match = "<platform>/*"`, or one chat). Swarm Map's Transcription card adds the vault.
