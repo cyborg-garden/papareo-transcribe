@@ -201,3 +201,16 @@ def test_a_confused_process_is_a_clean_error(f, tmp_path, stdout):
 
     with pytest.raises(f.FetchError, match="couldn't be reached"):
         f.fetch("https://example.org/a", str(tmp_path), run=lambda c, **k: subprocess.CompletedProcess(c, 1, stdout, b""))
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "gzip, gzip", "br", "deflate"])
+def test_a_compressed_reply_is_refused_undecoded(f, tmp_path, encoding):
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("accept-encoding"))
+        return httpx.Response(200, headers={"content-type": "audio/mp4", "content-encoding": encoding}, content=b"x" * 100)
+
+    with pytest.raises(f.FetchError, match="anyone with the link"):
+        f.download("https://example.org/a.mp3", str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
+    assert seen == ["identity"] and list(tmp_path.iterdir()) == []

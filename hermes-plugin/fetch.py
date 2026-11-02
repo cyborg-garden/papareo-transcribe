@@ -128,7 +128,9 @@ def _download(
 ) -> Path | None:
     for _ in range(MAX_REDIRECTS):
         _check(url, resolve)
-        with client.stream("GET", url) as r:
+        # Audio barely compresses, and a compressed reply can be a bomb that only
+        # grows once decoded, so ask for it as is and take it as it comes.
+        with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as r:
             if r.is_redirect and r.headers.get("location"):
                 url = urljoin(url, r.headers["location"])
                 continue
@@ -136,11 +138,13 @@ def _download(
                 return None
             if "text/html" in r.headers.get("content-type", "").lower():
                 return None
+            if r.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                return None
             target = dest_dir / ("recording" + _extension(r, url))
             total = 0
             first = b""
             with target.open("wb") as f:
-                for chunk in r.iter_bytes():
+                for chunk in r.iter_raw():
                     if not first:
                         first = chunk[:64].lstrip().lower()
                     total += len(chunk)
