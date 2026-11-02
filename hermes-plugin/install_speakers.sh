@@ -18,6 +18,9 @@ has() { [ -f "$2" ] && echo "$1  $2" | sha256sum -c - >/dev/null 2>&1; }
 
 mkdir -p "$HOME_DIR/models"
 HOME_DIR=$(cd "$HOME_DIR" && pwd)
+# Run as root, uv must not leave its cache where the agent's own user needs to write.
+UV_CACHE_DIR="$HOME_DIR/.uv-cache"
+export UV_CACHE_DIR
 cd "$HOME_DIR"
 venv/bin/python -c "pass" 2>/dev/null || { rm -rf venv; "$UV" venv --python 3.13 -q venv; }
 "$UV" pip install -q --python venv/bin/python --require-hashes -r "$HERE/speakers-requirements.txt"
@@ -40,4 +43,5 @@ if ! has "$EMB_SHA" emb.onnx; then
   has "$EMB_SHA" emb.tmp || { echo "voice model failed its check" >&2; rm -f emb.tmp; exit 1; }
   mv emb.tmp emb.onnx
 fi
+rm -rf "$HOME_DIR/.uv-cache"
 "$HOME_DIR/venv/bin/python" -I -c "import sherpa_onnx; print('speaker separation ready:', sherpa_onnx.__version__)"
