@@ -15,6 +15,19 @@ def f(plugin):
     return plugin.fetch
 
 
+def raw_transport(handler):
+    """A mock that serves bytes off the wire, undecoded, as a real connection does."""
+
+    def serve(request):
+        response = handler(request)
+        body = getattr(response, "_content", None)
+        if body is None:
+            return response
+        return httpx.Response(response.status_code, headers=response.headers, stream=httpx.ByteStream(body))
+
+    return httpx.MockTransport(serve)
+
+
 def public(host, port, **kw):
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
@@ -46,7 +59,7 @@ def test_onedrive_falls_through_to_the_second_way(f, tmp_path):
             return httpx.Response(401)
         return httpx.Response(200, headers={"content-type": "audio/mp4"}, content=b"audio")
 
-    path = f.download("https://1drv.ms/u/s!AbC", str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
+    path = f.download("https://1drv.ms/u/s!AbC", str(tmp_path), transport=raw_transport(handler), resolve=public)
     assert Path(path).read_bytes() == b"audio"
 
 
@@ -59,7 +72,7 @@ def test_redirects_are_followed_and_named(f, tmp_path):
             content=b"audio",
         )
 
-    path = f.download("https://example.org/start", str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
+    path = f.download("https://example.org/start", str(tmp_path), transport=raw_transport(handler), resolve=public)
     assert Path(path).name == "recording.m4a"
 
 
@@ -70,12 +83,12 @@ def test_redirects_are_followed_and_named(f, tmp_path):
 ])
 def test_login_pages_are_refused_and_never_kept(f, tmp_path, response):
     with pytest.raises(f.FetchError, match="anyone with the link"):
-        f.download("https://example.org/a.mp3", str(tmp_path), transport=httpx.MockTransport(lambda r: response), resolve=public)
+        f.download("https://example.org/a.mp3", str(tmp_path), transport=raw_transport(lambda r: response), resolve=public)
     assert list(tmp_path.iterdir()) == []
 
 
 def test_private_addresses_are_refused(f, tmp_path):
-    transport = httpx.MockTransport(lambda r: pytest.fail("must not connect"))
+    transport = raw_transport(lambda r: pytest.fail("must not connect"))
     with pytest.raises(f.FetchError, match="public address"):
         f.download("https://intranet.example/a.mp3", str(tmp_path), transport=transport, resolve=private)
 
@@ -88,7 +101,7 @@ def test_redirect_to_a_private_address_is_refused(f, tmp_path):
         return private(host, port) if host == "inner.example" else public(host, port)
 
     with pytest.raises(f.FetchError, match="public address"):
-        f.download("https://example.org/a", str(tmp_path), transport=httpx.MockTransport(handler), resolve=resolve)
+        f.download("https://example.org/a", str(tmp_path), transport=raw_transport(handler), resolve=resolve)
 
 
 @pytest.mark.parametrize("url", ["http://example.org/a.mp3", "file:///etc/passwd", "ftp://example.org/a"])
@@ -100,7 +113,7 @@ def test_only_https(f, tmp_path, url):
 def test_too_large(f, tmp_path):
     handler = lambda r: httpx.Response(200, headers={"content-type": "audio/mp4"}, content=b"x" * 100)  # noqa: E731
     with pytest.raises(f.FetchError, match="too large"):
-        f.download("https://example.org/a.mp3", str(tmp_path), max_bytes=10, transport=httpx.MockTransport(handler), resolve=public)
+        f.download("https://example.org/a.mp3", str(tmp_path), max_bytes=10, transport=raw_transport(handler), resolve=public)
 
 
 def test_errors_never_repeat_the_link(f, tmp_path):
@@ -110,7 +123,7 @@ def test_errors_never_repeat_the_link(f, tmp_path):
         raise httpx.ConnectError("boom " + secret)
 
     with pytest.raises(f.FetchError) as e:
-        f.download(secret, str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
+        f.download(secret, str(tmp_path), transport=raw_transport(handler), resolve=public)
     assert "SEKRET" not in str(e.value)
 
 
@@ -129,21 +142,21 @@ def test_public(f, address):
 
 @pytest.mark.parametrize("url", ["https://[::1/x", "https://example.org:abc/x", "https://user:pw@example.org/x"])
 def test_odd_links_are_a_clean_error(f, tmp_path, url):
-    transport = httpx.MockTransport(lambda r: httpx.Response(200, content=b"x"))
+    transport = raw_transport(lambda r: httpx.Response(200, content=b"x"))
     with pytest.raises(f.FetchError) as e:
         f.download(url, str(tmp_path), transport=transport, resolve=public)
     assert "a" * 70 not in str(e.value) and "pw" not in str(e.value)
 
 
 def test_redirect_to_a_broken_link_is_a_clean_error(f, tmp_path):
-    transport = httpx.MockTransport(lambda r: httpx.Response(302, headers={"location": "https://[bad"}))
+    transport = raw_transport(lambda r: httpx.Response(302, headers={"location": "https://[bad"}))
     with pytest.raises(f.FetchError):
         f.download("https://example.org/a", str(tmp_path), transport=transport, resolve=public)
 
 
 def test_a_served_playlist_name_is_not_kept(f, tmp_path):
     headers = {"content-type": "application/octet-stream", "content-disposition": 'attachment; filename="a.m3u8"'}
-    transport = httpx.MockTransport(lambda r: httpx.Response(200, headers=headers, content=b"#EXTM3U"))
+    transport = raw_transport(lambda r: httpx.Response(200, headers=headers, content=b"#EXTM3U"))
     path = f.download("https://example.org/x", str(tmp_path), transport=transport, resolve=public)
     assert Path(path).name == "recording"
 
@@ -209,8 +222,8 @@ def test_a_compressed_reply_is_refused_undecoded(f, tmp_path, encoding):
 
     def handler(request):
         seen.append(request.headers.get("accept-encoding"))
-        return httpx.Response(200, headers={"content-type": "audio/mp4", "content-encoding": encoding}, content=b"x" * 100)
+        return httpx.Response(200, headers={"content-type": "audio/mp4", "content-encoding": encoding}, stream=httpx.ByteStream(b"x" * 100))
 
     with pytest.raises(f.FetchError, match="anyone with the link"):
-        f.download("https://example.org/a.mp3", str(tmp_path), transport=httpx.MockTransport(handler), resolve=public)
+        f.download("https://example.org/a.mp3", str(tmp_path), transport=raw_transport(handler), resolve=public)
     assert seen == ["identity"] and list(tmp_path.iterdir()) == []
