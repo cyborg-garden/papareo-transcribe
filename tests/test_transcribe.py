@@ -54,6 +54,11 @@ class FakePapareo:
     def why_not(self):
         return "" if self.configured else "no Papa Reo key is configured on this agent"
 
+    def transcribe_timed(self, path):
+        from papareo_transcribe.papareo import Timed
+
+        return Timed(self.transcribe(path, None), getattr(self, "cues", ()))
+
     def transcribe(self, path, duration):
         self.calls += 1
         self.duration = duration
@@ -170,7 +175,6 @@ def test_papareo_never_runs_whisper(plugin, memo):
     r = w.run(memo, engine="papareo")
     assert r["sent"] is True and r["engine"] == "papareo"
     assert w.local_calls == 0 and w.local_sent == []
-    assert w.papareo.duration == 400.0, "length comes from the probe, for the long endpoint"
 
 
 def test_papareo_failure_without_whisper_offers_local_instead(plugin, memo):
@@ -468,3 +472,192 @@ def test_ovenmitt_wins_when_both_are_available(plugin, memo):
     r = w.run(memo, engine="papareo")
     assert r["handle"] == "v_0123456789ab" and "delivery" not in r
     assert w.local_sent == []
+
+
+# Speakers and paragraphs ------------------------------------------------------
+
+
+def _timed_world(plugin, diarize=None, secret="Tēnā koutou kaitiakitanga"):
+    sp = plugin.speakers
+    papareo = FakePapareo(text=secret)
+    papareo.cues = (sp.Cue(0, 2, secret), sp.Cue(2, 4, "āe"))
+    world = World(plugin, papareo=papareo, bridge=False, direct=("signal",))
+    deps = world.deps()
+    deps.diarize = diarize
+    return world, deps
+
+
+def test_papareo_transcript_gets_speakers_and_the_model_gets_no_text(plugin, memo, caplog):
+    sp = plugin.speakers
+    d = sp.Diarized((sp.Turn(0, 2, 0), sp.Turn(2, 4, 1)))
+    w, deps = _timed_world(plugin, lambda *a: d)
+    with caplog.at_level(logging.DEBUG):
+        r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["sent"] is True and r["speakers"] == 2 and "text" not in r
+    sent = w.local_sent[0][1]
+    assert "[00:00] Speaker 1\nTēnā koutou kaitiakitanga" in sent and "[00:02] Speaker 2\nāe" in sent
+    assert sent.rstrip().endswith(plugin.papareo.NOTICE) and sp.LABEL_NOTE in sent
+    assert "Tēnā" not in caplog.text and "Tēnā" not in repr(r)
+
+
+def test_failed_separation_spends_nothing(plugin, memo):
+    def broken(*a):
+        raise plugin.speakers.DiarizeError("speaker separation failed")
+
+    w, deps = _timed_world(plugin, broken)
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["sent"] is False and w.papareo.calls == 0 and "nothing was spent" in r["note"]
+
+
+def test_not_installed_spends_nothing(plugin, memo):
+    w, deps = _timed_world(plugin, None)
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["sent"] is False and w.papareo.calls == 0 and "not installed" in r["note"]
+
+
+def test_separation_is_not_run_unless_asked(plugin, memo):
+    w, deps = _timed_world(plugin, lambda *a: pytest.fail("must not run"))
+    r = plugin.transcribe.run(str(memo), "papareo", deps)
+    assert r["sent"] is True and "speakers" not in r
+    assert "Speaker" not in w.local_sent[0][1]
+
+
+def test_voice_samples_imply_speakers_and_report_unmatched(plugin, memo):
+    sp = plugin.speakers
+    seen = []
+
+    def diarize(path, n, samples, duration):
+        seen.append((n, samples))
+        return sp.Diarized((sp.Turn(0, 4, 0),), {0: "Aroha"}, ("Tama",))
+
+    w, deps = _timed_world(plugin, diarize)
+    samples = {"Aroha": str(memo), "Tama": str(memo)}
+    r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=2, voice_samples=samples)
+    assert seen == [(2, samples)]
+    assert r["named_speakers"] == ["Aroha"] and r["samples_not_matched"] == ["Tama"]
+    assert "[00:00] Aroha" in w.local_sent[0][1]
+
+
+def test_bad_voice_sample_is_refused_before_anything_runs(plugin, memo, tmp_path):
+    w, deps = _timed_world(plugin, lambda *a: pytest.fail("must not run"))
+    r = plugin.transcribe.run(str(memo), "papareo", deps, voice_samples={"Aroha": str(tmp_path / "nope.ogg")})
+    assert r["sent"] is False and r["error"].startswith("voice sample:") and w.papareo.calls == 0
+
+
+def test_no_timings_still_delivers_and_says_so(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: sp.Diarized((sp.Turn(0, 4, 0),)))
+    w.papareo.cues = ()
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["sent"] is True and "no speaker labels" in r["note"]
+
+
+def test_local_transcript_gets_paragraphs_and_speakers(plugin, memo):
+    sp = plugin.speakers
+    w = World(plugin)
+    w.local_result = plugin.local.LocalResult(
+        "a b", "en", 0.9, 4.0, "turbo", (sp.Cue(0, 2, "a"), sp.Cue(2, 4, "b"))
+    )
+    deps = w.deps()
+    deps.diarize = lambda *a: sp.Diarized((sp.Turn(0, 2, 0), sp.Turn(2, 4, 1)))
+    r = plugin.transcribe.run(str(memo), "local", deps, speakers=True)
+    assert r["speakers"] == 2 and "[00:02] Speaker 2\nb" in r["text"]
+
+
+def test_local_survives_failed_separation_with_a_note(plugin, memo):
+    w = World(plugin)
+    deps = w.deps()
+
+    def broken(*a):
+        raise plugin.speakers.DiarizeError("speaker separation failed")
+
+    deps.diarize = broken
+    r = plugin.transcribe.run(str(memo), "local", deps, speakers=True)
+    assert r["sent"] is True and "Speakers weren't separated" in r["note"]
+
+
+def test_paid_but_lost_tells_the_agent_it_was_charged(plugin, memo):
+    w, deps = _timed_world(plugin)
+    w.papareo.error = plugin.papareo.PaidButLost("Papa Reo finished, but the transcript couldn't be downloaded")
+    r = plugin.transcribe.run(str(memo), "papareo", deps)
+    assert r["papareo_charged"] is True and "costs again" in r["note"] and "Ask again to retry" not in r["note"]
+
+
+def test_a_shared_cue_is_split_between_speakers_in_the_file(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: sp.Diarized((sp.Turn(0, 2, 0), sp.Turn(2, 4, 1))))
+    w.papareo.cues = (sp.Cue(0, 4, "one two three four"),)
+    r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=2)
+    sent = w.local_sent[0][1]
+    assert r["speakers"] == 2 and "Speaker 1\none two" in sent and "Speaker 2\nthree four" in sent
+
+
+def test_no_timings_does_not_hide_a_failed_send(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: sp.Diarized((sp.Turn(0, 4, 0),)))
+    w.papareo.cues = ()
+    w.local_send_fails = True
+    deps = w.deps()
+    deps.diarize = lambda *a: sp.Diarized((sp.Turn(0, 4, 0),))
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["papareo_charged"] is True and "Ask before running" in r["note"] and "no speaker labels" in r["note"]
+
+
+def test_refusal_is_available_before_any_download(plugin, memo, tmp_path):
+    deps = World(plugin).deps()
+    assert "must be one of" in plugin.transcribe.refusal("bogus", deps, True)["error"]
+    assert plugin.transcribe.refusal("local", deps, False)["error"].startswith("Nothing was transcribed")
+    assert "voice sample" in plugin.transcribe.refusal("local", deps, True, {"x": str(tmp_path / "no")})["error"]
+    assert plugin.transcribe.refusal("local", deps, True, {"x": str(memo)}) is None
+
+
+def test_a_layout_crash_still_delivers_the_paid_words(plugin, memo, monkeypatch):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: sp.Diarized((sp.Turn(0, 4, 0),)))
+
+    def boom(*a, **k):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(plugin.transcribe, "render", boom)
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["sent"] is True and "no speaker labels" in r["note"]
+    assert "Tēnā koutou" in w.local_sent[0][1]
+
+
+def test_a_name_that_got_no_words_is_reported_as_not_found(plugin, memo):
+    sp = plugin.speakers
+    d = sp.Diarized((sp.Turn(0, 4, 0), sp.Turn(90, 95, 1)), {0: "Aroha", 1: "Tama"})
+    w, deps = _timed_world(plugin, lambda *a: d)
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["named_speakers"] == ["Aroha"] and r["samples_not_matched"] == ["Tama"]
+
+
+@pytest.mark.parametrize("clips_used,expected", [(True, [1]), (False, [])])
+def test_clips_count_as_used_only_if_the_worker_had_them(plugin, memo, clips_used, expected):
+    used = []
+
+    def broken(*a):
+        raise plugin.speakers.DiarizeError("speaker separation failed", clips_used)
+
+    w, deps = _timed_world(plugin, broken)
+    plugin.transcribe.run(str(memo), "papareo", deps, voice_samples={"a": str(memo)}, samples_used=lambda: used.append(1))
+    assert used == expected
+
+
+def test_success_counts_the_clips_as_used(plugin, memo):
+    sp = plugin.speakers
+    used = []
+    w, deps = _timed_world(plugin, lambda *a: sp.Diarized((sp.Turn(0, 4, 0),)))
+    plugin.transcribe.run(str(memo), "papareo", deps, voice_samples={"a": str(memo)}, samples_used=lambda: used.append(1))
+    assert used == [1]
+
+
+def test_not_installed_leaves_the_clips(plugin, memo):
+    used = []
+    w, deps = _timed_world(plugin, None)
+    plugin.transcribe.run(str(memo), "papareo", deps, voice_samples={"a": str(memo)}, samples_used=lambda: used.append(1))
+    assert used == []
+
+
+def test_a_lone_surrogate_does_not_lose_the_transcript(plugin):
+    assert plugin.papareo.with_footer("kia \ud800 ora").startswith(b"kia ? ora")

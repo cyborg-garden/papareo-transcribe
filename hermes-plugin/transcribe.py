@@ -23,14 +23,15 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .local import LocalResult
-from .papareo import NotConfigured, PapareoClient, PapareoError, with_footer
+from .papareo import NotConfigured, PaidButLost, PapareoClient, PapareoError, with_footer
+from .speakers import DiarizeError, Diarized, heard, render, split_at_turns
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +69,8 @@ class Deps:
     bridge_problem: Callable[[], str | None]
     now: Callable[[], datetime]
     filename_for: Callable[[str, datetime], str]
-    # Seconds of audio, for picking Papa Reo's short or long endpoint when
-    # whisper didn't run (engine="papareo"). None if unknown.
+    # Seconds of audio, for sizing the speaker separation timeout when whisper
+    # didn't run (engine="papareo"). None if unknown.
     duration: Callable[[str], float | None] | None = None
     # Whether a file with an unknown extension (.bin, none) holds audio.
     is_audio: Callable[[str], bool] | None = None
@@ -85,6 +86,8 @@ class Deps:
     # (text, whisper language) -> Decision. None until may_contain_mi is
     # wired in; until then engine="auto" is refused (ask the person instead).
     detect: Callable[[str, str], Decision] | None = None
+    # (path, number of speakers if known, name -> voice sample path, seconds).
+    diarize: Callable[..., Diarized] | None = None
 
 
 PAPAREO_SOURCE = "Papa Reo, Te Hiku Media"
@@ -140,13 +143,103 @@ ASK_FIRST = (
 )
 
 
-def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> dict[str, Any]:
-    """chosen_by_person: the person said which engine. The tool passes what
-    the agent claims; without it nothing runs and the agent is told to ask."""
+def _separate(
+    path: str,
+    num_speakers: int | None,
+    samples: Mapping[str, str] | None,
+    duration: float | None,
+    deps: Deps,
+    samples_used: Callable[[], None] | None = None,
+) -> tuple[Diarized | None, str | None]:
+    """Speakers for this recording, or why not. Local and free: it runs before
+    any money is spent, so a failure costs nothing."""
+    if deps.diarize is None:
+        return None, "speaker separation is not installed on this agent"
+    try:
+        diarized = deps.diarize(path, num_speakers, samples, duration)
+    except DiarizeError as e:
+        logger.warning("papareo_transcribe: speaker separation failed: %s", e)
+        if e.clips_used and samples_used:
+            samples_used()
+        return None, str(e)
+    except Exception as e:  # noqa: BLE001 - it may have had them: lean towards not keeping them
+        logger.warning("papareo_transcribe: speaker separation failed: %s", type(e).__name__)
+        if samples_used:
+            samples_used()
+        return None, "speaker separation failed"
+    if samples_used:
+        samples_used()
+    return diarized, None
+
+
+def _lay_out(cues: Any, text: str, diarized: Diarized | None, hints: Any = ()) -> tuple[str, Any, bool]:
+    """The transcript as it will be delivered. Layout must never cost the words:
+    if it fails for any reason, the plain text goes out. Never logs the text."""
+    if not cues:
+        return text, (), diarized is not None
+    try:
+        split = split_at_turns(cues, diarized.turns, hints) if diarized else cues
+        return render(split, diarized), split, False
+    except Exception as e:  # noqa: BLE001
+        logger.warning("papareo_transcribe: layout failed: %s", type(e).__name__)
+        return text, (), diarized is not None
+
+
+def _finish(result: dict[str, Any], extra: dict[str, Any], no_labels: bool) -> dict[str, Any]:
+    """Add the speaker fields without losing a note that is already there."""
+    out = {**result, **extra}
+    if no_labels:
+        missing = "Papa Reo didn't return timings this time, so the transcript has no speaker labels."
+        out["note"] = f"{result['note']} {missing}" if result.get("note") else missing
+    return out
+
+
+def _speaker_fields(cues: Any, diarized: Diarized | None) -> dict[str, Any]:
+    if diarized is None:
+        return {}
+    speakers = heard(cues, diarized) if cues else set()
+    named = {diarized.names[s] for s in speakers if s in diarized.names}
+    not_found = {*diarized.unmatched, *(set(diarized.names.values()) - named)}
+    out: dict[str, Any] = {"speakers": len(speakers)}
+    if named:
+        out["named_speakers"] = sorted(named)
+    if not_found:
+        out["samples_not_matched"] = sorted(not_found)
+    return out
+
+
+def refusal(
+    engine: str, deps: Deps, chosen_by_person: bool, voice_samples: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
+    """Why this call would be refused whatever the recording: asked before any
+    download as well as before any run."""
     if engine not in ENGINES:
         return {"sent": False, "error": f"engine must be one of {', '.join(ENGINES)}"}
     if (engine == "auto" and deps.detect is None) or (engine != "auto" and not chosen_by_person):
         return {"sent": False, "error": ASK_FIRST}
+    for sample in (voice_samples or {}).values():
+        problem = check_path(sample, deps.is_audio)
+        if problem:
+            return {"sent": False, "error": f"voice sample: {problem}"}
+    return None
+
+
+def run(
+    path: str,
+    engine: str,
+    deps: Deps,
+    chosen_by_person: bool = True,
+    speakers: bool = False,
+    num_speakers: int | None = None,
+    voice_samples: Mapping[str, str] | None = None,
+    samples_used: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    """chosen_by_person: the person said which engine. The tool passes what
+    the agent claims; without it nothing runs and the agent is told to ask."""
+    speakers = speakers or bool(voice_samples) or bool(num_speakers)
+    refused = refusal(engine, deps, chosen_by_person, voice_samples)
+    if refused:
+        return refused
     problem = check_path(path, deps.is_audio)
     if problem:
         return {"sent": False, "error": problem}
@@ -164,7 +257,14 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
     if engine == "local":
         if local is None:
             return {"sent": False, "error": "local transcription failed"}
-        return _deliver_local(local, filename, None, deps)
+        diarized, problem = (
+            _separate(path, num_speakers, voice_samples, local.duration, deps, samples_used)
+            if speakers else (None, None)
+        )
+        note = f"Speakers weren't separated: {problem}." if problem else None
+        text, cues, _ = _lay_out(local.cues, local.text, diarized)
+        local = replace(local, text=text)
+        return {**_deliver_local(local, filename, note, deps), **_speaker_fields(cues, diarized)}
 
     if engine == "auto":
         if local is None:
@@ -194,8 +294,23 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
         return _fallback(local, filename, f"Papa Reo wasn't used, and nothing was spent: {why_not}.", deps)
 
     duration = local.duration if local is not None else _probe(deps, path)
+    diarized: Diarized | None = None
+    if speakers:
+        diarized, problem = _separate(path, num_speakers, voice_samples, duration, deps, samples_used)
+        if diarized is None:
+            return {
+                "sent": False,
+                "engine": "none",
+                "note": (
+                    f"Speakers couldn't be separated ({problem}), so Papa Reo wasn't used and nothing was "
+                    "spent. Ask whether they'd like the transcript without speaker labels."
+                ),
+            }
     try:
-        text = deps.papareo.transcribe(path, duration)
+        timed = deps.papareo.transcribe_timed(path)
+    except PaidButLost as e:
+        logger.warning("papareo_transcribe: %s", e)
+        return _fallback(local, filename, f"{e}. Running it again costs again, so ask first.", deps, paid=True)
     except (NotConfigured, PapareoError) as e:
         logger.warning("papareo_transcribe: Papa Reo failed: %s", e)
         return _fallback(local, filename, f"Papa Reo didn't complete ({e}). Ask again to retry Papa Reo.", deps)
@@ -206,23 +321,29 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
             local, filename, "Papa Reo didn't complete (an unexpected error). Ask again to retry Papa Reo.", deps
         )
 
+    text, cues, no_labels = _lay_out(timed.cues, timed.text, diarized, timed.hints)
+    extra = _speaker_fields(cues, diarized)
+    del timed, cues
     body = with_footer(text)
     shared = text.strip() if deps.share_papareo_text else None
     del text
     if direct:
-        return _deliver_direct(body, filename, reasons, shared, deps)
+        return _finish(_deliver_direct(body, filename, reasons, shared, deps), extra, no_labels)
     try:
         info = deps.vault().put(
             body, VAULT, name=filename, mime="text/plain; charset=utf-8", labels=[filename]
         )
     except Exception:  # noqa: BLE001
         logger.exception("papareo_transcribe: vault put failed after a Papa Reo call")
-        return _fallback(
-            local, filename,
-            "Papa Reo transcribed it, but storing the protected transcript failed, so nothing was kept.",
-            deps,
-            paid=True,
-        )
+        return {
+            **_fallback(
+                local, filename,
+                "Papa Reo transcribed it, but storing the protected transcript failed, so nothing was kept.",
+                deps,
+                paid=True,
+            ),
+            **_shared(shared),
+        }
     finally:
         del body
 
@@ -237,7 +358,7 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
         result = {}
     if not (isinstance(result, dict) and result.get("sent")):
         code = _send_error_code(result)
-        return {
+        return _finish({
             "sent": False,
             "engine": "papareo",
             "handle": info.handle,
@@ -248,9 +369,9 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
                 f"{_RESEND_HINT.get(code, 'It can be resent with ovenmitt_vault_send.')}"
             ),
             **_shared(shared),
-        }
+        }, extra, no_labels)
     logger.info("papareo_transcribe: Papa Reo transcript sent as %s (%s)", info.handle, ",".join(reasons))
-    return {
+    return _finish({
         "sent": True,
         "engine": "papareo",
         "transcribed_by": PAPAREO_SOURCE,
@@ -258,7 +379,7 @@ def run(path: str, engine: str, deps: Deps, chosen_by_person: bool = True) -> di
         "filename": filename,
         **_shared(shared),
         "next": NEXT_PAPAREO,
-    }
+    }, extra, no_labels)
 
 
 # What to do next, in every result: the skill may never have been read.
@@ -401,7 +522,7 @@ def _safe(is_audio: Callable[[str], bool], path: str) -> bool:
 def _probe(deps: Deps, path: str) -> float | None:
     try:
         return deps.duration(path) if deps.duration else None
-    except Exception:  # noqa: BLE001 - unknown length: Papa Reo's short endpoint is tried
+    except Exception:  # noqa: BLE001 - unknown length: the shortest timeout applies
         return None
 
 

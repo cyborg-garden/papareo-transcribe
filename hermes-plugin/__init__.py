@@ -24,16 +24,21 @@ _POPPED_KEY: str | None = os.environ.pop("PAPAREO_API_KEY", None) or globals().g
 
 import json  # noqa: E402
 import logging  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
 import sys  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
 
-from . import deliver, transcribe  # noqa: E402
+from . import deliver, fetch, transcribe  # noqa: E402
 from .local import LocalWhisper, has_audio, probe_duration  # noqa: E402
 from .papareo import PapareoClient  # noqa: E402
+from .speakers import Diarizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 KEY_ENV = "PAPAREO_API_KEY"
 SOCKET_ENV = "OVENMITT_SOCKET"
@@ -43,6 +48,7 @@ COMPLIANT_ENV = "PAPAREO_KAITIAKITANGA_COMPLIANT"
 # Comma-separated platforms where, with no ovenmitt vault, Papa Reo
 # transcripts are attached to the chat directly (e.g. "signal"). Not a secret.
 DIRECT_ENV = "PAPAREO_DIRECT_PLATFORMS"
+MAX_SPEAKERS = 32
 
 SCHEMA: dict[str, Any] = {
     "name": "transcribe_recording",
@@ -53,12 +59,23 @@ SCHEMA: dict[str, Any] = {
         "nothing runs. engine='local': whisper on this machine, free, and you get the text back. "
         "engine='papareo': Papa Reo, Te Hiku Media's speech recognition for te reo Māori, a paid "
         "call; the transcript is protected: you get only a handle (or nothing), and you must not try "
-        "to read it."
+        "to read it. Give path for a file they sent, or url for a share link to one file (direct, "
+        "OneDrive, Google Drive, Dropbox). speakers=true labels who spoke when, on this machine. "
+        "voice_samples names speakers from short clips of each person; only use it when each person "
+        "has agreed, and nothing about their voice is kept."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path of the recording, as the message gave it."},
+            "url": {"type": "string", "description": "A share link to one recording, instead of path."},
+            "speakers": {"type": "boolean", "description": "True if the person wants speakers separated."},
+            "num_speakers": {"type": "integer", "description": "How many people speak, if the person said."},
+            "voice_samples": {
+                "type": "object",
+                "description": "Person's name -> path of a short clip of them, if the person sent clips.",
+                "additionalProperties": {"type": "string"},
+            },
             "engine": {"type": "string", "enum": ["local", "papareo"]},
             "chosen_by_person": {
                 "type": "boolean",
@@ -66,7 +83,7 @@ SCHEMA: dict[str, Any] = {
                 "Never guess or choose for them.",
             },
         },
-        "required": ["path", "engine", "chosen_by_person"],
+        "required": ["engine", "chosen_by_person"],
     },
 }
 
@@ -100,6 +117,74 @@ def _bridge_problem() -> str | None:
     except Exception:  # noqa: BLE001
         logger.exception("papareo_transcribe: the bridge's send_readiness failed")
         return "the ovenmitt bridge couldn't check this chat"
+
+
+def _voice_caches() -> list[Path]:
+    """Where the gateway keeps what people send: voice notes in one place, and audio
+    files such as .opus or .flac sent as documents in another."""
+    caches = []
+    for getter in ("get_audio_cache_dir", "get_document_cache_dir"):
+        try:
+            from gateway.platforms import base  # type: ignore[import-not-found]
+
+            caches.append(Path(getattr(base, getter)()).resolve())
+        except Exception:  # noqa: BLE001 - outside the harness
+            continue
+    return caches
+
+
+def _forget_samples(samples: dict[str, str], recording: str = "") -> None:
+    """Voice clips leave the gateway's caches once they've been used, and only those
+    caches: a file somewhere else is the person's own. The recording itself is not
+    a clip, even if it was also passed as one."""
+    caches = _voice_caches()
+    if not caches:
+        return
+    keep = Path(recording).resolve() if recording else None
+    for sample in samples.values():
+        try:
+            resolved = Path(sample).resolve()
+            if resolved != keep and any(resolved.is_relative_to(cache) for cache in caches):
+                resolved.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("papareo_transcribe: couldn't remove a voice clip from the cache")
+
+
+def _read_samples(raw: Any) -> tuple[dict[str, str], str | None]:
+    """voice_samples as {name: path}, also when it arrives as a JSON string."""
+    if raw in (None, "", {}):
+        return {}, None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    bad = "voice_samples must map each person's name to the path of their clip"
+    if not isinstance(raw, dict):
+        return {}, bad
+    samples: dict[str, str] = {}
+    for name, path in raw.items():
+        if not (isinstance(name, str) and isinstance(path, str) and path):
+            return {}, bad
+        # A name goes on a line of its own in the transcript: it can't add lines.
+        clean = re.sub(r"[\x00-\x1f\x7f\u2028\u2029]+", " ", name).strip()[:60]
+        clean = clean.encode("utf-8", "replace").decode("utf-8")
+        if not clean or clean in samples:
+            return {}, bad
+        samples[clean] = path
+    return samples, None
+
+
+def _read_count(raw: Any) -> tuple[int | None, str | None]:
+    if raw in (None, "", 0):
+        return None, None
+    try:
+        count = int(str(raw).strip()) if not isinstance(raw, bool) else 0
+    except ValueError:
+        count = 0
+    if not 1 <= count <= MAX_SPEAKERS:
+        return None, f"num_speakers must be a whole number from 1 to {MAX_SPEAKERS}"
+    return count, None
 
 
 def register(ctx: Any) -> None:
@@ -143,13 +228,56 @@ def register(ctx: Any) -> None:
         bridge_problem=_bridge_problem,
         now=deliver.now,
         filename_for=deliver.filename_for,
+        diarize=Diarizer(),
     )
 
     def handle(args: dict[str, Any], **_: Any) -> str:
         path = str(args.get("path") or "")
         engine = str(args.get("engine") or "auto")  # missing: refused with ASK_FIRST
         chosen = args.get("chosen_by_person") is True or str(args.get("chosen_by_person")).lower() == "true"
-        return json.dumps(transcribe.run(path, engine, deps, chosen_by_person=chosen), ensure_ascii=False)
+        url = str(args.get("url") or "").strip()
+        wanted = args.get("speakers") is True or str(args.get("speakers")).lower() == "true"
+        samples, bad = _read_samples(args.get("voice_samples"))
+        count, bad_count = _read_count(args.get("num_speakers"))
+        problem = bad or bad_count
+        if problem:
+            # Before anything is spent: dropping it quietly would lose the labels they asked for.
+            return json.dumps({"sent": False, "error": problem}, ensure_ascii=False)
+        tmp = None
+        used = False
+        try:
+            refused = transcribe.refusal(engine, deps, chosen, samples)
+            if refused:
+                return json.dumps(refused, ensure_ascii=False)
+            if url:
+                tmp = tempfile.mkdtemp(prefix="recording-")  # mode 0700
+                try:
+                    path = fetch.fetch(url, tmp)
+                except fetch.FetchError as e:
+                    return json.dumps({"sent": False, "error": str(e)}, ensure_ascii=False)
+                # Whatever its name says: a page saved as .mp3 must not be paid for.
+                try:
+                    audio = has_audio(path)
+                except Exception:  # noqa: BLE001 - can't tell: not paid for
+                    audio = False
+                if not audio:
+                    return json.dumps({"sent": False, "error": fetch.NEEDS_LINK}, ensure_ascii=False)
+
+            def mark_used() -> None:
+                nonlocal used
+                used = True
+
+            result = transcribe.run(
+                path, engine, deps, chosen_by_person=chosen, speakers=wanted, num_speakers=count,
+                voice_samples=samples, samples_used=mark_used,
+            )
+            return json.dumps(result, ensure_ascii=False)
+        finally:
+            # Clips that were never used stay: the agent asks, then calls again.
+            if used:
+                _forget_samples(samples, path)
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
 
     ctx.register_tool(
         name="transcribe_recording",
