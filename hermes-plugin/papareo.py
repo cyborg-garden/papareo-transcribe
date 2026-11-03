@@ -62,6 +62,10 @@ class PaidButLost(PapareoError):
     """The recording was accepted, so it may be charged for, but no transcript came back."""
 
 
+class TaskFailed(PaidButLost):
+    """Papa Reo itself reports that this task failed or was cancelled."""
+
+
 def with_footer(text: str) -> bytes:
     """The bytes that go into the vault: the transcript, then the footer."""
     return (text.strip() + "\n\n" + FOOTER + "\n" + NOTICE + "\n").encode("utf-8", "replace")
@@ -152,12 +156,40 @@ class PapareoClient:
         except httpx.TransportError as e:
             raise PapareoError("Papa Reo could not be reached") from e
 
-    def _collect(self, c: httpx.Client, task_id: str) -> Timed:
-        plain = self._fetch(c, task_id, "txt")
+    def start_task(self, path: str) -> str:
+        """Upload one part of a long job, and return its task id. Save that first:
+        asking for the result again costs nothing, but uploading again might."""
+        if not self.configured:
+            raise NotConfigured(self.why_not())
+        p = Path(path)
+        if p.stat().st_size > MAX_BYTES:
+            raise PapareoError("recording is too large to send")
+        try:
+            with self._client() as c:
+                return self._upload(c, p)
+        except httpx.TimeoutException as e:
+            raise PapareoError("Papa Reo timed out") from e
+        except httpx.TransportError as e:
+            raise PapareoError("Papa Reo could not be reached") from e
+
+    def finish_task(self, task_id: str) -> Timed:
+        """Wait for a part and download it. Giving up leaves the task running, so it
+        can be asked for again. A silent part is an empty result, not a failure."""
+        try:
+            with self._client() as c:
+                self._wait(c, task_id, cancel=False)
+                return self._collect(c, task_id, empty_ok=True)
+        except httpx.TimeoutException as e:
+            raise PaidButLost(LOST) from e
+        except httpx.TransportError as e:
+            raise PaidButLost(LOST) from e
+
+    def _collect(self, c: httpx.Client, task_id: str, empty_ok: bool = False) -> Timed:
+        plain = self._fetch(c, task_id, "txt", empty_ok)
         timed = self._fetch(c, task_id, "json")
         srt = self._fetch(c, task_id, "srt")
         cues = parse_segments(timed) if timed else ()
-        if cues and (plain is None or same_words(cues, plain)):
+        if cues and (not (plain or "").strip() or same_words(cues, plain)):
             return Timed(" ".join(q.text for q in cues), cues, tuple(parse_srt(srt)) if srt else ())
         if plain is not None:
             return Timed(plain)
@@ -172,7 +204,7 @@ class PapareoClient:
             raise PapareoError("Papa Reo did not return a task id")
         return task_id
 
-    def _wait(self, c: httpx.Client, task_id: str) -> None:
+    def _wait(self, c: httpx.Client, task_id: str, cancel: bool = True) -> None:
         """Until the transcript is ready. A hiccup while checking doesn't lose the job."""
         deadline = time.monotonic() + LARGE_DEADLINE_S
         failures = 0
@@ -189,16 +221,17 @@ class PapareoClient:
             if state == "SUCCESS":
                 return
             if state in ("FAILURE", "CANCELLED"):
-                raise PaidButLost(LOST)
+                raise TaskFailed(LOST)
             if time.monotonic() > deadline:
-                try:
-                    c.post(f"/tuhi/transcribe/large/{task_id}/cancel")
-                except httpx.HTTPError:
-                    pass
+                if cancel:
+                    try:
+                        c.post(f"/tuhi/transcribe/large/{task_id}/cancel")
+                    except httpx.HTTPError:
+                        pass
                 raise PaidButLost(LOST)
             self._sleep(POLL_EVERY_S)
 
-    def _fetch(self, c: httpx.Client, task_id: str, kind: str) -> str | None:
+    def _fetch(self, c: httpx.Client, task_id: str, kind: str, empty_ok: bool = False) -> str | None:
         """One download, tried twice. None if it can't be had."""
         for attempt in range(DOWNLOAD_TRIES):
             if attempt:
@@ -207,7 +240,7 @@ class PapareoClient:
                 r = c.get(f"/tuhi/transcribe/large/{task_id}/download", params={"download_type": kind})
             except httpx.HTTPError:
                 continue
-            if 200 <= r.status_code < 300 and r.text.strip():
+            if 200 <= r.status_code < 300 and (empty_ok or r.text.strip()):
                 return r.text
         return None
 

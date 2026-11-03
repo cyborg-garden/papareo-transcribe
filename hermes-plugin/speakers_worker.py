@@ -36,10 +36,13 @@ def embed(extractor, audio: np.ndarray) -> np.ndarray | None:
     return vector / norm if norm else None
 
 
-def name_speakers(request: dict, audio: np.ndarray, turns: list[dict]) -> tuple[dict[str, str], list[str]]:
-    extractor = so.SpeakerEmbeddingExtractor(
+def extractor_for(request: dict):
+    return so.SpeakerEmbeddingExtractor(
         so.SpeakerEmbeddingExtractorConfig(model=request["models"] + "/emb.onnx", num_threads=2)
     )
+
+
+def voices_of(extractor, audio: np.ndarray, turns: list[dict]) -> dict[int, np.ndarray]:
     voices: dict[int, np.ndarray] = {}
     for speaker in {t["speaker"] for t in turns}:
         pieces, left = [], MAX_SPEAKER_AUDIO_S * RATE
@@ -51,6 +54,10 @@ def name_speakers(request: dict, audio: np.ndarray, turns: list[dict]) -> tuple[
         vector = embed(extractor, np.concatenate(pieces)) if pieces else None
         if vector is not None:
             voices[speaker] = vector
+    return voices
+
+
+def name_speakers(request: dict, extractor, voices: dict[int, np.ndarray]) -> tuple[dict[str, str], list[str]]:
     scores = []
     samples = {}
     for name, path in request["samples"].items():
@@ -93,8 +100,16 @@ def main() -> None:
     # one: when that happens, let the audio decide.
     if wanted > 1 and len({t["speaker"] for t in turns}) == 1:
         turns = separate(models, audio, -1)
-    names, unmatched = name_speakers(request, audio, turns) if request.get("samples") else ({}, [])
-    json.dump({"turns": turns, "names": names, "unmatched": unmatched}, sys.stdout)
+    names, unmatched, voices = {}, [], {}
+    if request.get("samples") or request.get("want_voices"):
+        extractor = extractor_for(request)
+        voices = voices_of(extractor, audio, turns)
+        if request.get("samples"):
+            names, unmatched = name_speakers(request, extractor, voices)
+    answer = {"turns": turns, "names": names, "unmatched": unmatched}
+    if request.get("want_voices"):
+        answer["voices"] = {str(s): v.tolist() for s, v in voices.items()}
+    json.dump(answer, sys.stdout)
 
 
 if __name__ == "__main__":

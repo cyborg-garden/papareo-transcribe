@@ -231,3 +231,57 @@ def test_absurd_timings_lose_the_layout_not_the_words(plugin, audio, value):
 def test_bad_gzip_on_download_is_not_a_lost_job(plugin, audio):
     h = _flow(js=httpx.DecodingError("bad gzip"), txt="Kia ora e hoa")
     assert _client(plugin, h).transcribe_timed(str(audio)).text == "Kia ora e hoa"
+
+
+def test_finish_task_leaves_a_slow_task_running(plugin, monkeypatch):
+    pa = plugin.papareo
+    posts = []
+
+    def handler(request):
+        if request.method == "POST":
+            posts.append(str(request.url))
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"status": "PENDING"})
+
+    client = pa.PapareoClient("k", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    monkeypatch.setattr(pa, "LARGE_DEADLINE_S", -1.0)
+    with pytest.raises(pa.PaidButLost):
+        client.finish_task("t")
+    assert posts == []
+
+
+def test_finish_task_reports_a_failed_task(plugin):
+    pa = plugin.papareo
+    client = pa.PapareoClient(
+        "k", transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": "FAILURE"})), sleep=lambda s: None
+    )
+    with pytest.raises(pa.TaskFailed):
+        client.finish_task("t")
+
+
+def test_finish_task_accepts_a_silent_part(plugin):
+    pa = plugin.papareo
+
+    def handler(request):
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"status": "SUCCESS"})
+        return httpx.Response(200, text="")
+
+    client = pa.PapareoClient("k", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    assert client.finish_task("t").text == ""
+
+
+def test_words_in_the_json_survive_an_empty_text_download(plugin):
+    pa = plugin.papareo
+
+    def handler(request):
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"status": "SUCCESS"})
+        kind = request.url.params.get("download_type")
+        if kind == "json":
+            return httpx.Response(200, json=[{"text": "kia ora", "start_time": 0.0, "end_time": 1.0}])
+        return httpx.Response(200, text="")
+
+    client = pa.PapareoClient("k", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    assert client.finish_task("t").text == "kia ora"
+

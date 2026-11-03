@@ -42,6 +42,7 @@ def test_register_pops_the_key_and_registers_one_tool(plugin, monkeypatch):
     assert tool["name"] == "transcribe_recording"
     assert set(tool["schema"]["parameters"]["properties"]) == {
         "path", "url", "engine", "chosen_by_person", "speakers", "num_speakers", "voice_samples",
+        "long_job_ok", "resume_job", "discard_job",
     }
     # The handler refuses when the agent picked the engine itself.
     r = json.loads(tool["handler"]({"path": "/nonexistent.ogg", "engine": "local"}))

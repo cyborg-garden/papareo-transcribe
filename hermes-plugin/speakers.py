@@ -74,6 +74,8 @@ class Diarized:
     names: Mapping[int, str] = field(default_factory=dict)
     # Names whose sample matched nobody in the recording.
     unmatched: tuple[str, ...] = ()
+    # Speaker number -> voice vector, only when asked for. Never written anywhere.
+    voices: Mapping[int, tuple[float, ...]] = field(default_factory=dict)
 
 
 class DiarizeError(Exception):
@@ -82,6 +84,10 @@ class DiarizeError(Exception):
     def __init__(self, message: str, clips_used: bool = False) -> None:
         super().__init__(message)
         self.clips_used = clips_used  # the worker had the voice clips
+
+
+class NoSpeech(DiarizeError):
+    """It ran, and nobody spoke."""
 
 
 def _seconds(h: str, m: str, s: str, ms: str) -> float:
@@ -379,6 +385,7 @@ class Diarizer:
         num_speakers: int | None = None,
         samples: Mapping[str, str] | None = None,
         duration: float | None = None,
+        want_voices: bool = False,
     ) -> Diarized:
         problem = self.why_not()
         if problem:
@@ -399,6 +406,7 @@ class Diarizer:
                 "models": str(self.models),
                 "num_speakers": num_speakers,
                 "samples": sample_wavs,
+                "want_voices": want_voices,
             }
             started = True
             done = self._run(
@@ -422,8 +430,9 @@ class Diarizer:
             turns = tuple(Turn(float(t["start"]), float(t["end"]), int(t["speaker"])) for t in answer["turns"])
             names = {int(k): str(v) for k, v in (answer.get("names") or {}).items()}
             unmatched = tuple(str(n) for n in (answer.get("unmatched") or []))
+            voices = {int(k): tuple(float(x) for x in v) for k, v in (answer.get("voices") or {}).items()}
         except (ValueError, KeyError, TypeError) as e:
             raise DiarizeError("speaker separation answered with something unexpected", True) from e
         if not turns:
-            raise DiarizeError("no speech was found in the recording", True)
-        return Diarized(turns, names, unmatched)
+            raise NoSpeech("no speech was found in the recording", True)
+        return Diarized(turns, names, unmatched, voices)

@@ -105,7 +105,7 @@ def _caption(source: str, note: str | None = None) -> str:
     return f"Transcript ({source}). {note}" if note else f"Transcript ({source})"
 
 
-def check_path(path: str, is_audio: Callable[[str], bool] | None = None) -> str | None:
+def check_path(path: str, is_audio: Callable[[str], bool] | None = None, max_bytes: int = MAX_BYTES) -> str | None:
     p = Path(path)
     if not path or not p.is_file():
         return "no recording at that path"
@@ -113,9 +113,13 @@ def check_path(path: str, is_audio: Callable[[str], bool] | None = None) -> str 
     # an unknown extension is checked by content before it is refused.
     if p.suffix.lower() not in SUPPORTED and not (is_audio and _safe(is_audio, path)):
         return f"not a recording this can read ({p.suffix or 'no extension'}, and no audio found in it)"
-    if p.stat().st_size > MAX_BYTES:
+    if p.stat().st_size > max_bytes:
         return "recording is too large"
     return None
+
+
+def long_caption() -> str:
+    return _caption(PAPAREO_SOURCE)
 
 
 def preflight(deps: Deps) -> str | None:
@@ -188,7 +192,7 @@ def _separate(
     return diarized, None
 
 
-def _lay_out(cues: Any, text: str, diarized: Diarized | None, hints: Any = ()) -> tuple[str, Any, bool]:
+def lay_out(cues: Any, text: str, diarized: Diarized | None, hints: Any = ()) -> tuple[str, Any, bool]:
     """The transcript as it will be delivered. Layout must never cost the words:
     if it fails for any reason, the plain text goes out. Never logs the text."""
     if not cues:
@@ -280,7 +284,7 @@ def run(
             if speakers else (None, None)
         )
         note = f"Speakers weren't separated: {problem}." if problem else None
-        text, cues, _ = _lay_out(local.cues, local.text, diarized)
+        text, cues, _ = lay_out(local.cues, local.text, diarized)
         local = replace(local, text=text)
         return {**_deliver_local(local, filename, note, deps), **_speaker_fields(cues, diarized)}
 
@@ -304,7 +308,7 @@ def run(
         reasons = ("asked",)
 
     why_not = preflight(deps)
-    direct = bool(why_not) and _direct_ok(deps)
+    direct = bool(why_not) and direct_ok(deps)
     if direct:
         why_not = None
     if why_not:
@@ -339,7 +343,7 @@ def run(
             local, filename, "Papa Reo didn't complete (an unexpected error). Ask again to retry Papa Reo.", deps
         )
 
-    text, cues, no_labels = _lay_out(timed.cues, timed.text, diarized, timed.hints)
+    text, cues, no_labels = lay_out(timed.cues, timed.text, diarized, timed.hints)
     extra = _speaker_fields(cues, diarized)
     del timed, cues
     body = with_footer(text)
@@ -424,7 +428,7 @@ NEXT_PAPAREO_DIRECT = (
 )
 
 
-def _direct_ok(deps: Deps) -> bool:
+def direct_ok(deps: Deps) -> bool:
     """No vault, but the operator allows attaching Papa Reo files directly on
     this chat's platform, and the key is there."""
     if not deps.direct_platforms or not deps.papareo.configured:

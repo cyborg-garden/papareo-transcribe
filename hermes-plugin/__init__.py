@@ -33,12 +33,13 @@ from typing import Any  # noqa: E402
 
 from . import deliver, fetch, transcribe  # noqa: E402
 from .local import LocalWhisper, has_audio, probe_duration  # noqa: E402
+from . import longjob  # noqa: E402
 from .papareo import PapareoClient  # noqa: E402
 from .speakers import Diarizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 KEY_ENV = "PAPAREO_API_KEY"
 SOCKET_ENV = "OVENMITT_SOCKET"
@@ -49,6 +50,8 @@ COMPLIANT_ENV = "PAPAREO_KAITIAKITANGA_COMPLIANT"
 # transcripts are attached to the chat directly (e.g. "signal"). Not a secret.
 DIRECT_ENV = "PAPAREO_DIRECT_PLATFORMS"
 MAX_SPEAKERS = 32
+DIRECT_ONLY = "long recordings can only be sent back where Papa Reo files may be attached directly"
+CANT_MEASURE = "I couldn't tell how long that recording is, so nothing was spent. It may be damaged: ask them to check it plays"
 
 SCHEMA: dict[str, Any] = {
     "name": "transcribe_recording",
@@ -62,7 +65,8 @@ SCHEMA: dict[str, Any] = {
         "to read it. Give path for a file they sent, or url for a share link to one file (direct, "
         "OneDrive, Google Drive, Dropbox). speakers=true labels who spoke when, on this machine. "
         "voice_samples names speakers from short clips of each person; only use it when each person "
-        "has agreed, and nothing about their voice is kept."
+        "has agreed, and nothing about their voice is kept. Papa Reo recordings over an hour run in the "
+        "background in parts: the first call explains what to confirm with the person."
     ),
     "parameters": {
         "type": "object",
@@ -76,6 +80,9 @@ SCHEMA: dict[str, Any] = {
                 "description": "Person's name -> path of a short clip of them, if the person sent clips.",
                 "additionalProperties": {"type": "string"},
             },
+            "long_job_ok": {"type": "boolean", "description": "True only once the person has agreed to a long job."},
+            "resume_job": {"type": "boolean", "description": "True to carry on this chat's stopped long job. Nothing else is needed."},
+            "discard_job": {"type": "boolean", "description": "True only if the person says to give up this chat's stopped long job, which deletes it. Parts already paid for are lost."},
             "engine": {"type": "string", "enum": ["local", "papareo"]},
             "chosen_by_person": {
                 "type": "boolean",
@@ -187,6 +194,22 @@ def _read_count(raw: Any) -> tuple[int | None, str | None]:
     return count, None
 
 
+def _this_chat() -> str:
+    try:
+        return deliver.bind().chat_id
+    except Exception:  # noqa: BLE001 - no chat, so nothing can be waiting in it
+        return ""
+
+
+def _length(path: str) -> float | None:
+    """A recording's length in seconds, by decoding it if its header won't say: a long
+    file must not slip into the short flow and be paid for without agreement."""
+    try:
+        return probe_duration(path) or longjob.measure(path)
+    except Exception:  # noqa: BLE001 - can't tell: the short flow copes
+        return None
+
+
 def register(ctx: Any) -> None:
     """Hermes plugin entry point."""
     global _POPPED_KEY
@@ -231,7 +254,88 @@ def register(ctx: Any) -> None:
         diarize=Diarizer(),
     )
 
+    def job_env(samples: dict[str, str], attach: Any, say: Any, recording: str = "") -> longjob.Env:
+        return longjob.Env(
+            papareo=papareo, diarize=deps.diarize, attach=attach, say=say, samples=samples,
+            samples_used=lambda: _forget_samples(samples, recording),
+        )
+
+    def run_long(job: longjob.Job, env: longjob.Env) -> None:
+        longjob.run_job(job, env, transcribe.lay_out, transcribe.long_caption())
+
+    def discard() -> dict:
+        try:
+            chat = deliver.bind()
+        except Exception:  # noqa: BLE001
+            return {"sent": False, "error": "this conversation has no chat to send to"}
+        if longjob.is_busy():
+            return {"sent": False, "error": longjob.BUSY}
+        job = longjob.latest_for(chat.platform, chat.chat_id)
+        if job is None:
+            return {"sent": False, "error": "there is no stopped long job for this chat"}
+        longjob.forget(job)
+        return {"sent": False, "discarded": True}
+
+    def resume() -> dict:
+        if not transcribe.direct_ok(deps):
+            return {"sent": False, "error": DIRECT_ONLY}
+        try:
+            chat = deliver.bind()
+        except Exception:  # noqa: BLE001
+            return {"sent": False, "error": "this conversation has no chat to send to"}
+        if longjob.is_busy():
+            return {"sent": False, "error": longjob.BUSY}
+        if longjob.latest_for(chat.platform, chat.chat_id) is None:
+            return {"sent": False, "error": "there is no stopped long job for this chat"}
+
+        def work() -> None:
+            # Read again inside the lock: it may have finished in between.
+            job = longjob.latest_for(chat.platform, chat.chat_id)
+            if job is not None:
+                run_long(job, job_env({}, chat.attach, chat.say))
+
+        if not longjob.start(work):
+            return {"sent": False, "error": longjob.BUSY}
+        return {"sent": False, "started": True, "next": longjob.NEXT_STARTED}
+
+    def begin_long(
+        path: str, duration: float, speakers: bool, count: int | None, samples: dict[str, str], agreed: bool, ours: bool
+    ) -> dict:
+        problem = longjob.refusal(path, duration, speakers, count, deps.diarize, transcribe.direct_ok(deps))
+        if problem:
+            return {"sent": False, "error": problem}
+        if longjob.is_busy():
+            return {"sent": False, "error": longjob.BUSY}
+        waiting = longjob.latest_for(deps.platform() or "", _this_chat())
+        if waiting is not None:
+            return {"sent": False, "error": longjob.WAITING.format(name=waiting.filename)}
+        if not agreed:
+            return longjob.confirmation(duration)
+        try:
+            chat = deliver.bind()
+        except Exception:  # noqa: BLE001
+            return {"sent": False, "error": "this conversation has no chat to send to"}
+        job = longjob.reserve(
+            path, duration, chat.platform, chat.chat_id, deliver.filename_for(path, deps.now()), speakers, count,
+            shutil.move if ours else shutil.copyfile, chat.thread_id, chat.profile, bool(samples),
+        )
+        env = job_env(samples, chat.attach, chat.say, path)
+        if not longjob.start(lambda: run_long(job, env)):
+            longjob.forget(job)
+            return {"sent": False, "error": longjob.BUSY}
+        return {"sent": False, "started": True, "next": longjob.NEXT_STARTED}
+
+    longjob.recover(
+        lambda job: deliver.bind_chat(job.platform, job.chat_id, job.thread_id, job.profile),
+        lambda job, attach, say: run_long(job, job_env({}, attach, say)),
+        lambda job: papareo.configured and job.platform in direct,
+    )
+
     def handle(args: dict[str, Any], **_: Any) -> str:
+        if args.get("resume_job") is True or str(args.get("resume_job")).lower() == "true":
+            return json.dumps(resume(), ensure_ascii=False)
+        if args.get("discard_job") is True or str(args.get("discard_job")).lower() == "true":
+            return json.dumps(discard(), ensure_ascii=False)
         path = str(args.get("path") or "")
         engine = str(args.get("engine") or "auto")  # missing: refused with ASK_FIRST
         chosen = args.get("chosen_by_person") is True or str(args.get("chosen_by_person")).lower() == "true"
@@ -262,6 +366,18 @@ def register(ctx: Any) -> None:
                     audio = False
                 if not audio:
                     return json.dumps({"sent": False, "error": fetch.NEEDS_LINK}, ensure_ascii=False)
+
+            if engine == "papareo" and not transcribe.check_path(path, has_audio, longjob.MAX_BYTES):
+                seconds = _length(path)
+                if seconds is None:
+                    # It might be long, and long ones need agreement, so it isn't paid for.
+                    return json.dumps({"sent": False, "error": CANT_MEASURE}, ensure_ascii=False)
+                if seconds > longjob.LONG_AFTER_S:
+                    agreed = args.get("long_job_ok") is True or str(args.get("long_job_ok")).lower() == "true"
+                    return json.dumps(
+                        begin_long(path, seconds, wanted or bool(samples) or bool(count), count, samples, agreed, bool(tmp)),
+                        ensure_ascii=False,
+                    )
 
             def mark_used() -> None:
                 nonlocal used
