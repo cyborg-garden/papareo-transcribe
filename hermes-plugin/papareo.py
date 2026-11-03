@@ -127,7 +127,9 @@ class PapareoClient:
 
     def transcribe_timed(self, path: str) -> Timed:
         """Transcribe with timings, for paragraphs and speakers. Always the large
-        flow, whatever the length: only it offers timed downloads."""
+        flow, whatever the length. The short endpoint can give per-word timings
+        (with_metadata), but it stops at five minutes and is more prone to missing
+        words: 47 of 54 against 54 of 54 on one test clip."""
         if not self.configured:
             raise NotConfigured(self.why_not())
         p = Path(path)

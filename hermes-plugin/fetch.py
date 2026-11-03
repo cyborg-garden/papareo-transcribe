@@ -38,8 +38,9 @@ TIMEOUT_S = 120.0
 TOO_LONG = "that link took too long to download"
 UNREACHABLE = "that link couldn't be reached"
 NEEDS_LINK = (
-    "that link didn't give me an audio file. It may need a login, or point at a folder. "
-    "Ask for a link to one file, shared as 'anyone with the link can view', or for the file itself"
+    "that link didn't give me an audio file. It may need a login, point at a folder, or have been "
+    "copied from the address bar after opening the file, which only works in that browser. "
+    "Ask for the original share link to one file, shared as 'anyone with the link can view', or for the file itself"
 )
 _DRIVE_ID = re.compile(r"/file/(?:u/\d+/)?d/([\w-]+)")
 _NOT_PUBLIC = tuple(

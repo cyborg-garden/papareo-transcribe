@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 # Swarm Map's Transcription card sets this vault up; transcripts go nowhere else.
 VAULT = "papareo"
+# More voices than this, when nobody said how many, is the clustering splitting
+# people up, not a crowd: real speech has given 50 "speakers". Labels like that
+# are worse than none, and it's known before anything is paid for.
+MAX_UNASKED_SPEAKERS = 8
 # The operator's export folder for this vault (an `fs` destination), if any.
 FOLDER = "folder"
 ENGINES = ("auto", "papareo", "local")
@@ -169,6 +173,18 @@ def _separate(
         return None, "speaker separation failed"
     if samples_used:
         samples_used()
+    found = len({t.speaker for t in diarized.turns})
+    if found > (num_speakers or MAX_UNASKED_SPEAKERS):
+        logger.warning("papareo_transcribe: separation heard an unlikely %d voices", found)
+        # One clause, read by the person too: a local transcript carries it as its
+        # caption, and both callers add their own punctuation around it.
+        clips = ", and the voice clips were deleted, so they'd need sending again" if samples else ""
+        if num_speakers:
+            return None, f"it heard {found} voices when told {num_speakers}, so this recording can't be separated reliably{clips}"
+        return None, (
+            f"it heard {found} voices, which is almost certainly wrong, "
+            f"so it needs to know how many people are in the recording{clips}"
+        )
     return diarized, None
 
 
@@ -436,7 +452,8 @@ def _deliver_direct(
             "papareo_charged": True,
             "note": (
                 "Papa Reo transcribed it (that was paid for), but the file couldn't be attached to this chat, "
-                "and no copy was kept. Ask before running Papa Reo again."
+                "and no copy was kept. A group send can reach some people and still report a failure, so ask "
+                "whether it arrived anyway. Ask before running Papa Reo again."
             ),
             **_shared(shared),
         }

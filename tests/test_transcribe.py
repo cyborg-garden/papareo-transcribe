@@ -462,7 +462,7 @@ def test_direct_send_failure_says_it_was_paid_and_keeps_no_copy(plugin, memo, ca
     with caplog.at_level(logging.DEBUG):
         r = w.run(memo, engine="papareo")
     assert r["sent"] is False and r["papareo_charged"] is True and r["delivery"] == "direct"
-    assert "couldn't be attached" in r["note"]
+    assert "couldn't be attached" in r["note"] and "arrived anyway" in r["note"]
     assert_no_papareo_text(r, w)
     assert w.papareo.text not in caplog.text
 
@@ -507,6 +507,66 @@ def test_failed_separation_spends_nothing(plugin, memo):
     w, deps = _timed_world(plugin, broken)
     r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
     assert r["sent"] is False and w.papareo.calls == 0 and "nothing was spent" in r["note"]
+
+
+def _voices(sp, n):
+    return sp.Diarized(tuple(sp.Turn(i, i + 1, i) for i in range(n)))
+
+
+def test_an_impossible_speaker_count_spends_nothing_and_asks(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: _voices(sp, 50))
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["sent"] is False and w.papareo.calls == 0
+    assert "50 voices" in r["note"] and "how many people" in r["note"] and "nothing was spent" in r["note"]
+
+
+def test_a_count_they_gave_lifts_the_limit(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: _voices(sp, 12))
+    r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=12)
+    assert r["sent"] is True and w.papareo.calls == 1
+
+
+def test_more_voices_than_they_said_spends_nothing(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: _voices(sp, 50))
+    r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=3)
+    assert r["sent"] is False and w.papareo.calls == 0
+
+
+def test_samples_are_still_cleared_when_the_count_is_impossible(plugin, memo):
+    sp = plugin.speakers
+    used = []
+    w, deps = _timed_world(plugin, lambda *a: _voices(sp, 50))
+    r = plugin.transcribe.run(
+        str(memo), "papareo", deps, voice_samples={"Aroha": str(memo)}, samples_used=lambda: used.append(1)
+    )
+    assert used == [1] and w.papareo.calls == 0 and "sending again" in r["note"]
+
+
+def test_clips_are_mentioned_when_a_count_was_given_too(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: _voices(sp, 50))
+    r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=3, voice_samples={"Aroha": str(memo)})
+    assert "sending again" in r["note"] and ".)" not in r["note"]
+
+
+def test_a_count_that_was_ignored_does_not_ask_for_the_count_again(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: _voices(sp, 50))
+    r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=3)
+    assert "how many people" not in r["note"] and "without speaker labels" in r["note"]
+
+
+def test_local_transcript_keeps_going_without_impossible_labels(plugin, memo):
+    sp = plugin.speakers
+    w = World(plugin)
+    deps = w.deps()
+    deps.diarize = lambda *a: _voices(sp, 50)
+    r = plugin.transcribe.run(str(memo), "local", deps, speakers=True)
+    assert r["sent"] is True and "50 voices" in r["note"] and "Speaker 1" not in r.get("text", "")
+    assert "num_speakers" not in r["note"] and ".." not in r["note"]
 
 
 def test_not_installed_spends_nothing(plugin, memo):
