@@ -82,6 +82,7 @@ SCHEMA: dict[str, Any] = {
             },
             "long_job_ok": {"type": "boolean", "description": "True only once the person has agreed to a long job."},
             "resume_job": {"type": "boolean", "description": "True to carry on this chat's stopped long job. Nothing else is needed."},
+            "discard_job": {"type": "boolean", "description": "True only if the person says to give up this chat's stopped long job, which deletes it. Parts already paid for are lost."},
             "engine": {"type": "string", "enum": ["local", "papareo"]},
             "chosen_by_person": {
                 "type": "boolean",
@@ -193,6 +194,13 @@ def _read_count(raw: Any) -> tuple[int | None, str | None]:
     return count, None
 
 
+def _this_chat() -> str:
+    try:
+        return deliver.bind().chat_id
+    except Exception:  # noqa: BLE001 - no chat, so nothing can be waiting in it
+        return ""
+
+
 def _length(path: str) -> float | None:
     """A recording's length in seconds, by decoding it if its header won't say: a long
     file must not slip into the short flow and be paid for without agreement."""
@@ -255,6 +263,19 @@ def register(ctx: Any) -> None:
     def run_long(job: longjob.Job, env: longjob.Env) -> None:
         longjob.run_job(job, env, transcribe.lay_out, transcribe.long_caption())
 
+    def discard() -> dict:
+        try:
+            chat = deliver.bind()
+        except Exception:  # noqa: BLE001
+            return {"sent": False, "error": "this conversation has no chat to send to"}
+        if longjob.is_busy():
+            return {"sent": False, "error": longjob.BUSY}
+        job = longjob.latest_for(chat.platform, chat.chat_id)
+        if job is None:
+            return {"sent": False, "error": "there is no stopped long job for this chat"}
+        longjob.forget(job)
+        return {"sent": False, "discarded": True}
+
     def resume() -> dict:
         if not transcribe.direct_ok(deps):
             return {"sent": False, "error": DIRECT_ONLY}
@@ -285,6 +306,9 @@ def register(ctx: Any) -> None:
             return {"sent": False, "error": problem}
         if longjob.is_busy():
             return {"sent": False, "error": longjob.BUSY}
+        waiting = longjob.latest_for(deps.platform() or "", _this_chat())
+        if waiting is not None:
+            return {"sent": False, "error": longjob.WAITING}
         if not agreed:
             return longjob.confirmation(duration)
         try:
@@ -310,6 +334,8 @@ def register(ctx: Any) -> None:
     def handle(args: dict[str, Any], **_: Any) -> str:
         if args.get("resume_job") is True or str(args.get("resume_job")).lower() == "true":
             return json.dumps(resume(), ensure_ascii=False)
+        if args.get("discard_job") is True or str(args.get("discard_job")).lower() == "true":
+            return json.dumps(discard(), ensure_ascii=False)
         path = str(args.get("path") or "")
         engine = str(args.get("engine") or "auto")  # missing: refused with ASK_FIRST
         chosen = args.get("chosen_by_person") is True or str(args.get("chosen_by_person")).lower() == "true"

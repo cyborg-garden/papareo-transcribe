@@ -378,6 +378,15 @@ def _notes(job: Job, env: Env, results: Sequence[Timed]) -> str:
         notes.append(f"Couldn't match these voice clips to anyone: {', '.join(job.unmatched)}.")
     if job.had_samples and not env.samples and not job.names and not job.unmatched:
         notes.append("Voice clips were lost in a restart, so speakers are numbered, not named.")
+    silent = sum(1 for r in results if not r.text.strip())
+    if silent:
+        notes.append(f"{silent} of {len(results)} parts came back with no words, which may just be silence.")
+    found = job.parts[-1][1] if job.parts else 0.0
+    if job.expected_s - found > max(60.0, job.expected_s * 0.02):
+        notes.append(
+            f"The recording claimed to be {job.expected_s / 3600:.1f} hours, but only {found / 3600:.1f} hours "
+            "could be read, so it may be cut off."
+        )
     rough = sum(1 for r in results if r.text.strip() and not r.cues)
     if job.speakers and rough:
         notes.append(f"Papa Reo gave no timings for {rough} part(s), so their speaker labels are rough.")
@@ -451,6 +460,11 @@ def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], c
 
 
 BUSY = "another long transcript is running on this agent. Ask them to try again when it's finished"
+WAITING = (
+    "this chat already has a stopped long transcript, with parts that may already be paid for. Starting another "
+    "would pay again if it's the same recording. Ask them: carry on (call with resume_job=true), or give it up "
+    "(discard_job=true, and then send this one again)"
+)
 NEXT_STARTED = (
     "It's now running in the background, and the file will be posted in this chat when it's done, which may "
     "take hours. Tell them that in one short message. Don't call this again, and don't send anything else."
@@ -651,15 +665,17 @@ def recover(
                 if job is None or job.state != "running":
                     continue
                 attach, say = senders
-                if not allowed(job):
+                if allowed(job):
+                    say("The agent restarted, so I'm carrying on with your transcript. Parts already done aren't paid for again.")
+                    work(job, attach, say)
+                else:
                     _mark_stopped(job)
                     say("I can't carry on with your transcript here any more, so it has stopped. Nothing more was spent.")
-                    continue
-                say("The agent restarted, so I'm carrying on with your transcript. Parts already done aren't paid for again.")
-                work(job, attach, say)
             finally:
                 lock.close()
-            if load(_folder(job)) and load(_folder(job)).state == "running":
+            # Never round again on the same job, whatever just happened to it.
+            after = load(_folder(job))
+            if after and after.state == "running":
                 return
 
     if spawn:

@@ -189,7 +189,7 @@ class PapareoClient:
         timed = self._fetch(c, task_id, "json")
         srt = self._fetch(c, task_id, "srt")
         cues = parse_segments(timed) if timed else ()
-        if cues and (plain is None or same_words(cues, plain)):
+        if cues and (not (plain or "").strip() or same_words(cues, plain)):
             return Timed(" ".join(q.text for q in cues), cues, tuple(parse_srt(srt)) if srt else ())
         if plain is not None:
             return Timed(plain)

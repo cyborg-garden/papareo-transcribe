@@ -269,3 +269,19 @@ def test_finish_task_accepts_a_silent_part(plugin):
 
     client = pa.PapareoClient("k", transport=httpx.MockTransport(handler), sleep=lambda s: None)
     assert client.finish_task("t").text == ""
+
+
+def test_words_in_the_json_survive_an_empty_text_download(plugin):
+    pa = plugin.papareo
+
+    def handler(request):
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"status": "SUCCESS"})
+        kind = request.url.params.get("download_type")
+        if kind == "json":
+            return httpx.Response(200, json=[{"text": "kia ora", "start_time": 0.0, "end_time": 1.0}])
+        return httpx.Response(200, text="")
+
+    client = pa.PapareoClient("k", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    assert client.finish_task("t").text == "kia ora"
+

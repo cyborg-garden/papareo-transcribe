@@ -632,3 +632,45 @@ def test_old_jobs_cannot_be_resumed(plugin, lj, tmp_path, monkeypatch):
     os.utime(lj.jobs_home() / job.id, (old, old))
     assert lj.latest_for("signal", "chat") is None
 
+
+def test_a_silent_part_is_mentioned(plugin, lj, tmp_path):
+    from papareo_transcribe.papareo import Timed
+
+    captions = []
+    client = FakeClient(plugin)
+    original = client.finish_task
+    client.finish_task = lambda task: Timed("") if task == "task-1" else original(task)
+    job, env, *_ = world(plugin, lj, tmp_path, speakers=False, count=None, papareo=client)
+    env.attach = lambda n, t, c: captions.append(c)
+    run(plugin, lj, job, env)
+    assert "no words" in captions[0]
+
+
+def test_a_cut_off_recording_is_mentioned(plugin, lj, tmp_path):
+    captions = []
+    job, env, *_ = world(plugin, lj, tmp_path, duration=8000.0, speakers=False, count=None)
+    env.attach = lambda n, t, c: captions.append(c)
+    run(plugin, lj, job, env)
+    assert "cut off" in captions[0] and "2.2 hours" in captions[0]
+
+
+def test_a_stopped_job_blocks_a_new_one_until_decided(plugin, tool, lj, tmp_path, monkeypatch):
+    bound = lambda: plugin.deliver.Bound("signal", "chat", "", "", lambda *a: None, lambda m: None)  # noqa: E731
+    monkeypatch.setattr(plugin.deliver, "bind", bound)
+    client = FakeClient(plugin, fail={"task-0": plugin.papareo.PaidButLost("x")})
+    job, env, *_ = world(plugin, lj, tmp_path, speakers=False, count=None, papareo=client)
+    run(plugin, lj, job, env)
+    f = tmp_path / "again.m4a"
+    f.write_bytes(b"x")
+    assert "already be paid" in call(tool, f)["error"]
+    assert call(tool, "", discard_job=True)["discarded"] is True
+    assert call(tool, f)["needs_agreement"] is True
+
+
+def test_recovery_never_spins_when_it_cannot_save(plugin, lj, tmp_path, monkeypatch):
+    world(plugin, lj, tmp_path, speakers=False, count=None)
+    said = []
+    monkeypatch.setattr(lj, "_mark_stopped", lambda job: None)
+    recover(lj, lambda j: (lambda *a: None, said.append), lambda *a: None, allowed=lambda j: False)
+    assert len(said) == 1
+
