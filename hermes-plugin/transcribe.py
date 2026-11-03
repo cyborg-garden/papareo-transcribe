@@ -176,13 +176,14 @@ def _separate(
     found = len({t.speaker for t in diarized.turns})
     if found > (num_speakers or MAX_UNASKED_SPEAKERS):
         logger.warning("papareo_transcribe: separation heard an unlikely %d voices", found)
-        # Written for the person too: a local transcript carries it as its caption.
+        # One clause, read by the person too: a local transcript carries it as its
+        # caption, and both callers add their own punctuation around it.
+        clips = ", and the voice clips were deleted, so they'd need sending again" if samples else ""
         if num_speakers:
-            return None, f"it heard {found} voices when told {num_speakers}, so this recording can't be separated reliably"
-        clips = " The voice clips were deleted, so they'd need sending again." if samples else ""
+            return None, f"it heard {found} voices when told {num_speakers}, so this recording can't be separated reliably{clips}"
         return None, (
-            f"it heard {found} voices, which is almost certainly wrong. "
-            f"Tell me how many people are in the recording and I can try again.{clips}"
+            f"it heard {found} voices, which is almost certainly wrong, "
+            f"so it needs to know how many people are in the recording{clips}"
         )
     return diarized, None
 
