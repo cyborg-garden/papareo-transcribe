@@ -39,11 +39,11 @@ Each Papa Reo run costs money, so never retry it on your own; let the person ask
 
 ## Links
 
-If they send a share link to a recording instead of a file, pass it as `url` instead of `path`. OneDrive, Google Drive, Dropbox and direct links work when shared as "anyone with the link can view". It has to be one file, not a folder. Don't try to open or download it yourself. The downloaded copy is deleted when the transcript has been sent. If it comes back with an error, pass that on in plain words.
+If they send a share link to a recording instead of a file, pass it as `url` instead of `path`. OneDrive, Google Drive, Dropbox and direct links work when shared as "anyone with the link can view". It has to be one file, not a folder. A long address copied from the browser after opening the file won't work, even if it opens for them: ask for the original share link. Don't try to open or download it yourself, and never ask for cookies or a login from their browser. The downloaded copy is deleted when the transcript has been sent. If it comes back with an error, pass that on in plain words.
 
 ## Speakers
 
-If they want to know who said what, set `speakers: true`, and `num_speakers` if they told you how many people there are. This runs on this machine, costs nothing extra and adds labels like "Speaker 1". If it can't run, Papa Reo isn't charged and the result says so: ask whether they want the transcript without labels. The labels are a machine's guess, and the file says so.
+If they want to know who said what, ask how many people are in the recording unless they've said, because guessing is unreliable on real recordings. Then set `speakers: true` and `num_speakers`. If they don't know, leave `num_speakers` out; if it hears an unlikely number of voices it stops before Papa Reo is charged and tells you to ask. This runs on this machine, costs nothing extra and adds labels like "Speaker 1". If it can't run, Papa Reo isn't charged and the result says so: ask whether they want the transcript without labels. The labels are a machine's guess, and the file says so.
 
 To put names on the labels, they can send a short clip of each person. Pass those as `voice_samples`, with each person's name and the clip's path. Only do this when each person has agreed to it: ask if you aren't sure. The result's `samples_not_matched` lists anyone who wasn't recognised. No voiceprint is kept, the clips are deleted once they've been used, and there is no way to keep a voice yet, so don't offer to remember one.
 

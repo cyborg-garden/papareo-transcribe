@@ -227,3 +227,7 @@ def test_a_compressed_reply_is_refused_undecoded(f, tmp_path, encoding):
     with pytest.raises(f.FetchError, match="anyone with the link"):
         f.download("https://example.org/a.mp3", str(tmp_path), transport=raw_transport(handler), resolve=public)
     assert seen == ["identity"] and list(tmp_path.iterdir()) == []
+
+
+def test_the_refusal_explains_address_bar_links(plugin):
+    assert "address bar" in plugin.fetch.NEEDS_LINK and "original" in plugin.fetch.NEEDS_LINK
