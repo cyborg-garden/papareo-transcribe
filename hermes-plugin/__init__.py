@@ -308,7 +308,7 @@ def register(ctx: Any) -> None:
             return {"sent": False, "error": longjob.BUSY}
         waiting = longjob.latest_for(deps.platform() or "", _this_chat())
         if waiting is not None:
-            return {"sent": False, "error": longjob.WAITING}
+            return {"sent": False, "error": longjob.WAITING.format(name=waiting.filename)}
         if not agreed:
             return longjob.confirmation(duration)
         try:

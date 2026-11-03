@@ -662,7 +662,8 @@ def test_a_stopped_job_blocks_a_new_one_until_decided(plugin, tool, lj, tmp_path
     run(plugin, lj, job, env)
     f = tmp_path / "again.m4a"
     f.write_bytes(b"x")
-    assert "already be paid" in call(tool, f)["error"]
+    answer = call(tool, f)["error"]
+    assert "already be paid" in answer and "t.txt" in answer
     assert call(tool, "", discard_job=True)["discarded"] is True
     assert call(tool, f)["needs_agreement"] is True
 

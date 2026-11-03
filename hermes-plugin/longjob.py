@@ -461,9 +461,9 @@ def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], c
 
 BUSY = "another long transcript is running on this agent. Ask them to try again when it's finished"
 WAITING = (
-    "this chat already has a stopped long transcript, with parts that may already be paid for. Starting another "
-    "would pay again if it's the same recording. Ask them: carry on (call with resume_job=true), or give it up "
-    "(discard_job=true, and then send this one again)"
+    "this chat already has a stopped long transcript ({name}), with parts that may already be paid for, and it may "
+    "be someone else's in a group. Starting another would pay again if it's the same recording. Ask them: carry on "
+    "(call with resume_job=true), or give it up (discard_job=true, and then send this one again)"
 )
 NEXT_STARTED = (
     "It's now running in the background, and the file will be posted in this chat when it's done, which may "
