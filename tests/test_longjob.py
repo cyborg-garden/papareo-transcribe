@@ -17,9 +17,15 @@ def lj(plugin, tmp_path, monkeypatch):
     return plugin.longjob
 
 
+cuts = []
+
+
 def fake_ffmpeg(cmd, **kw):
+    if cmd[0] == "ffprobe":
+        return subprocess.CompletedProcess(cmd, 0, b"4000\n", b"")
     if "null" in cmd:
         return subprocess.CompletedProcess(cmd, 0, b"", b"silence_end: 1810 | silence_duration: 2\n")
+    cuts.append(cmd)
     Path(cmd[-1]).write_bytes(b"flac")
     return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
@@ -52,8 +58,8 @@ class FakeClient:
 def world(plugin, lj, tmp_path, duration=4000.0, speakers=True, count=2, diarize=None, papareo=None, samples=None):
     sent, said, used = [], [], []
     (tmp_path / "r.m4a").write_bytes(b"audio")
-    job = lj.new_job(str(tmp_path / "r.m4a"), duration, "signal", "chat", "t.txt", speakers, count,
-                     lambda a, b: Path(b).write_bytes(Path(a).read_bytes()), fake_ffmpeg)
+    folder = lj.reserve(str(tmp_path / "r.m4a"), lambda a, b: Path(b).write_bytes(Path(a).read_bytes()))
+    job = lj.prepare(folder, duration, "signal", "chat", "t.txt", speakers, count, run=fake_ffmpeg)
     env = lj.Env(
         papareo=papareo or FakeClient(plugin), diarize=diarize,
         attach=lambda name, text, caption: sent.append(text), say=said.append,
@@ -343,8 +349,7 @@ def test_tool_starts_once_agreed_and_keeps_the_original(plugin, tool, lj, tmp_pa
     monkeypatch.setattr(lj, "silences", lambda *a: [])
     monkeypatch.setattr(lj, "start", lambda work, spawn=None: True)
     answer = call(tool, f, long_job_ok=True)
-    assert answer["started"] is True and answer["parts"] == 30 and f.exists()
-    assert lj.latest_for("signal", "chat") is not None
+    assert answer["started"] is True and f.exists()
 
 
 def test_tool_has_nothing_to_resume(plugin, tool, monkeypatch):
@@ -357,3 +362,170 @@ def test_a_short_recording_is_not_a_job(plugin, tool, lj, tmp_path, monkeypatch)
     f.write_bytes(b"x")
     monkeypatch.setattr(plugin, "probe_duration", lambda path: 60.0)
     assert "needs_agreement" not in call(tool, f)
+
+
+def test_a_long_file_whose_header_is_silent_still_asks_first(plugin, tool, tmp_path, monkeypatch):
+    f = tmp_path / "r.webm"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(plugin, "probe_duration", lambda path: None)
+    monkeypatch.setattr(plugin.longjob, "measure", lambda path: 7200.0)
+    assert call(tool, f)["needs_agreement"] is True
+
+
+def test_a_probe_that_crashes_does_not_break_the_short_flow(plugin, tool, tmp_path, monkeypatch):
+    f = tmp_path / "r.m4a"
+    f.write_bytes(b"x")
+
+    def broken(path):
+        raise OSError("no ffprobe")
+
+    monkeypatch.setattr(plugin, "probe_duration", broken)
+    assert "needs_agreement" not in call(tool, f)
+
+
+def test_measure_reads_the_decoded_length(lj):
+    def run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, b"", b"size=N/A time=00:01:00.00\rsize=N/A time=15:00:01.50 bitrate=N/A\n")
+
+    assert lj.measure("x", run) == 54001.5
+
+
+def test_measure_gives_up_cleanly(lj):
+    assert lj.measure("x", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, b"", b"")) is None
+
+
+def test_busy_leaves_nothing_that_could_be_paid_for_later(plugin, tool, lj, tmp_path, monkeypatch):
+    f = tmp_path / "r.m4a"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(plugin.deliver, "bind", lambda: ("signal", "chat", lambda *a: None, lambda m: None))
+    monkeypatch.setattr(lj, "start", lambda work, spawn=None: False)
+    assert "another long" in call(tool, f, long_job_ok=True)["error"]
+    assert list(lj.jobs_home().iterdir()) == [] and lj.latest_for("signal", "chat") is None
+
+
+def test_a_reserved_folder_cannot_be_resumed(plugin, lj, tmp_path):
+    f = tmp_path / "r.m4a"
+    f.write_bytes(b"x")
+    lj.reserve(str(f), lambda a, b: Path(b).write_bytes(b"x"))
+    assert lj.latest_for("signal", "chat") is None
+
+
+def test_resume_refuses_where_direct_delivery_was_removed(plugin, tool, monkeypatch):
+    registered = []
+
+    class Ctx:
+        def register_tool(self, **kw):
+            registered.append(kw)
+
+    monkeypatch.setenv("PAPAREO_DIRECT_PLATFORMS", "matrix")
+    plugin.register(Ctx())
+    assert "attached directly" in call(registered[0]["handler"], "", resume_job=True)["error"]
+
+
+def test_the_last_part_runs_to_the_end_and_the_others_are_exact(plugin, lj, tmp_path):
+    cuts.clear()
+    job, env, *_ = world(plugin, lj, tmp_path, speakers=False, count=None)
+    run(plugin, lj, job, env)
+    parts = [c for c in cuts if "-ss" in c]
+    assert len(parts) == len(job.parts) and "-t" in parts[0] and "-t" not in parts[-1]
+    assert parts[0][parts[0].index("-i") + 1].endswith(lj.SOURCE)
+
+
+def test_the_true_length_decides_the_parts(plugin, lj, tmp_path):
+    job, *_ = world(plugin, lj, tmp_path, duration=99999.0)
+    assert job.parts[-1][1] == 4000.0
+
+
+def test_an_unreadable_recording_stops_with_nothing_left(plugin, lj, tmp_path):
+    f = tmp_path / "r.m4a"
+    f.write_bytes(b"x")
+    folder = lj.reserve(str(f), lambda a, b: Path(b).write_bytes(b"x"))
+    with pytest.raises(lj.Stopped, match="nothing was spent"):
+        lj.prepare(folder, 4000.0, "signal", "chat", "t.txt", False, None,
+                   run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, b"", b""))
+    assert not folder.exists()
+
+
+def test_a_recording_with_no_speech_is_not_paid_for(plugin, lj, tmp_path):
+    def nobody(*a):
+        raise plugin.speakers.NoSpeech("no speech", True)
+
+    client = FakeClient(plugin)
+    job, env, sent, said, _ = world(plugin, lj, tmp_path, diarize=nobody, papareo=client)
+    run(plugin, lj, job, env)
+    assert client.started == [] and not sent and "nothing was spent" in said[0]
+
+
+def test_a_failed_upload_admits_it_could_charge_again(plugin, lj, tmp_path):
+    client = FakeClient(plugin)
+
+    def broken(path):
+        raise plugin.papareo.PapareoError("Papa Reo timed out")
+
+    client.start_task = broken
+    job, env, sent, said, _ = world(plugin, lj, tmp_path, speakers=False, count=None, papareo=client)
+    run(plugin, lj, job, env)
+    assert "charged twice" in said[0] and lj.latest_for("signal", "chat").state == "stopped"
+
+
+def test_unmatched_clips_are_reported_with_the_file(plugin, lj, tmp_path):
+    captions = []
+    job, env, *_ = world(plugin, lj, tmp_path, diarize=two_voices(plugin), samples={"Aroha": "x"})
+    env.attach = lambda name, text, caption: captions.append(caption)
+    run(plugin, lj, job, env)
+    assert "Aroha" in captions[0]
+
+
+def test_a_part_without_timings_is_reported(plugin, lj, tmp_path):
+    from papareo_transcribe.papareo import Timed
+
+    captions = []
+    client = FakeClient(plugin)
+    client.finish_task = lambda task: Timed("kupu.")
+    job, env, *_ = world(plugin, lj, tmp_path, diarize=two_voices(plugin), papareo=client)
+    env.attach = lambda name, text, caption: captions.append(caption)
+    run(plugin, lj, job, env)
+    assert "no timings" in captions[0] and SECRET not in captions[0]
+
+
+def test_a_restart_carries_on_and_says_so(plugin, lj, tmp_path):
+    job, *_ = world(plugin, lj, tmp_path, speakers=False, count=None)
+    ran, said = [], []
+    lj.recover(lambda j: (lambda *a: None, said.append), lambda j, attach, say: ran.append(j.id),
+               spawn=lambda go: go(), wait=lambda s: None)
+    assert ran == [job.id] and "restarted" in said[0] and not lj.is_busy()
+
+
+def test_a_stopped_job_waits_to_be_asked(plugin, lj, tmp_path):
+    client = FakeClient(plugin, fail={"task-0": plugin.papareo.PaidButLost("x")})
+    job, env, *_ = world(plugin, lj, tmp_path, speakers=False, count=None, papareo=client)
+    run(plugin, lj, job, env)
+    assert lj.running_jobs() == []
+
+
+def test_a_process_with_no_gateway_never_runs_a_job(plugin, lj, tmp_path, monkeypatch):
+    world(plugin, lj, tmp_path, speakers=False, count=None)
+    monkeypatch.setattr(lj, "RECOVER_TRIES", 3)
+    ran = []
+
+    def no_gateway(job):
+        raise plugin.deliver.NoChat("no running gateway")
+
+    lj.recover(no_gateway, lambda *a: ran.append(1), spawn=lambda go: go(), wait=lambda s: None)
+    assert ran == []
+
+
+def test_a_vanishing_folder_does_not_crash_the_lookup(plugin, lj, tmp_path, monkeypatch):
+    job, *_ = world(plugin, lj, tmp_path)
+    (lj.jobs_home() / "ghost").mkdir()
+    assert lj.latest_for("signal", "chat").id == job.id
+
+
+def test_old_jobs_cannot_be_resumed(plugin, lj, tmp_path, monkeypatch):
+    job, *_ = world(plugin, lj, tmp_path)
+    import os
+
+    old = 1_000_000.0
+    os.utime(lj.jobs_home() / job.id, (old, old))
+    assert lj.latest_for("signal", "chat") is None
+

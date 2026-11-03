@@ -26,7 +26,6 @@ import json  # noqa: E402
 import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
-import subprocess  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -192,6 +191,15 @@ def _read_count(raw: Any) -> tuple[int | None, str | None]:
     return count, None
 
 
+def _length(path: str) -> float | None:
+    """A recording's length in seconds, by decoding it if its header won't say: a long
+    file must not slip into the short flow and be paid for without agreement."""
+    try:
+        return probe_duration(path) or longjob.measure(path)
+    except Exception:  # noqa: BLE001 - can't tell: the short flow copes
+        return None
+
+
 def register(ctx: Any) -> None:
     """Hermes plugin entry point."""
     global _POPPED_KEY
@@ -236,27 +244,28 @@ def register(ctx: Any) -> None:
         diarize=Diarizer(),
     )
 
-    def launch(job: longjob.Job, samples: dict[str, str], platform: str, chat_id: str, attach: Any, say: Any) -> dict:
-        env = longjob.Env(
+    def job_env(samples: dict[str, str], attach: Any, say: Any, recording: str = "") -> longjob.Env:
+        return longjob.Env(
             papareo=papareo, diarize=deps.diarize, attach=attach, say=say, samples=samples,
-            samples_used=lambda: _forget_samples(samples),
+            samples_used=lambda: _forget_samples(samples, recording),
         )
-        caption = transcribe.long_caption()
-        if not longjob.start(lambda: longjob.run_job(job, env, transcribe.lay_out, caption)):
-            return {"sent": False, "error": longjob.BUSY}
-        return {"sent": False, "started": True, "parts": len(job.parts), "next": longjob.NEXT_STARTED}
+
+    def run_long(job: longjob.Job, env: longjob.Env) -> None:
+        longjob.run_job(job, env, transcribe.lay_out, transcribe.long_caption())
 
     def resume() -> dict:
+        if not transcribe.direct_ok(deps):
+            return {"sent": False, "error": "long recordings can only be sent back where Papa Reo files may be attached directly"}
         try:
             platform, chat_id, attach, say = deliver.bind()
         except Exception:  # noqa: BLE001
             return {"sent": False, "error": "this conversation has no chat to send to"}
-        if longjob.is_busy():
-            return {"sent": False, "error": longjob.BUSY}
         job = longjob.latest_for(platform, chat_id)
         if job is None:
             return {"sent": False, "error": "there is no stopped long job for this chat"}
-        return launch(job, {}, platform, chat_id, attach, say)
+        if not longjob.start(lambda: run_long(job, job_env({}, attach, say))):
+            return {"sent": False, "error": longjob.BUSY}
+        return {"sent": False, "started": True, "parts": len(job.parts), "next": longjob.NEXT_STARTED}
 
     def begin_long(
         path: str, duration: float, speakers: bool, count: int | None, samples: dict[str, str], agreed: bool, ours: bool
@@ -272,11 +281,27 @@ def register(ctx: Any) -> None:
             platform, chat_id, attach, say = deliver.bind()
         except Exception:  # noqa: BLE001
             return {"sent": False, "error": "this conversation has no chat to send to"}
-        job = longjob.new_job(
-            path, duration, platform, chat_id, deliver.filename_for(path, deps.now()), speakers, count,
-            shutil.move if ours else shutil.copyfile, subprocess.run,
-        )
-        return launch(job, samples, platform, chat_id, attach, say)
+        filename = deliver.filename_for(path, deps.now())
+        folder = longjob.reserve(path, shutil.move if ours else shutil.copyfile)
+        env = job_env(samples, attach, say, path)
+
+        def work() -> None:
+            try:
+                job = longjob.prepare(folder, duration, platform, chat_id, filename, speakers, count, had_samples=bool(samples))
+            except longjob.Stopped as e:
+                say(str(e))
+                return
+            run_long(job, env)
+
+        if not longjob.start(work):
+            shutil.rmtree(folder, ignore_errors=True)
+            return {"sent": False, "error": longjob.BUSY}
+        return {"sent": False, "started": True, "next": longjob.NEXT_STARTED}
+
+    longjob.recover(
+        lambda job: deliver.bind_chat(job.platform, job.chat_id, job.thread_id),
+        lambda job, attach, say: run_long(job, job_env({}, attach, say)),
+    )
 
     def handle(args: dict[str, Any], **_: Any) -> str:
         if args.get("resume_job") is True or str(args.get("resume_job")).lower() == "true":
@@ -312,8 +337,8 @@ def register(ctx: Any) -> None:
                 if not audio:
                     return json.dumps({"sent": False, "error": fetch.NEEDS_LINK}, ensure_ascii=False)
 
-            if engine == "papareo" and path and Path(path).is_file():
-                seconds = probe_duration(path)
+            if engine == "papareo" and not transcribe.check_path(path, has_audio, longjob.MAX_BYTES):
+                seconds = _length(path)
                 if seconds is not None and seconds > longjob.LONG_AFTER_S:
                     agreed = args.get("long_job_ok") is True or str(args.get("long_job_ok")).lower() == "true"
                     return json.dumps(

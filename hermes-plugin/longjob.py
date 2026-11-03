@@ -5,8 +5,11 @@ It runs in the background, so nothing depends on one chat turn lasting for hours
 Speakers are separated before anything is paid for, as they are for short
 recordings. Voice vectors stay in memory for that stage and are then dropped.
 
-On disk, in a private folder until the job ends: the recording, its cut points,
-Papa Reo task ids, and who spoke when. Transcript text and voice vectors never go
+The recording is first turned into one 16 kHz mono FLAC, so every cut lands on an
+exact sample whatever the original format was, and its real length is known.
+
+On disk, in a private folder until the job ends: that FLAC, its cut points, Papa
+Reo task ids, and who spoke when. Transcript text and voice vectors never go
 there: a resumed job downloads the text again by task id, which costs nothing.
 """
 
@@ -41,11 +44,16 @@ KEEP_S = 7 * 24 * 60 * 60.0
 # Cosine similarity for "the same person as in an earlier part".
 LINK_THRESHOLD = 0.45
 SILENCE_FILTER = "silencedetect=noise=-35dB:d=0.4"
-TOOL_TIMEOUT_S = 60 * 60.0
+TOOL_TIMEOUT_S = 2 * 60 * 60.0
+SOURCE = "source.flac"
 HOME_ENV = "PAPAREO_JOBS_HOME"
 JOB_FILE = "job.json"
+RECOVER_TRIES = 60
+RECOVER_WAIT_S = 10.0
 RESUME_HINT = "Ask me to resume the transcript and I'll carry on. Parts already done aren't paid for again."
 
+MEASURE_TIMEOUT_S = 20 * 60.0
+_DECODED = re.compile(r"time=(\d+):(\d\d):(\d\d(?:\.\d+)?)")
 _SILENCE_END = re.compile(r"silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)")
 _busy = threading.Lock()
 
@@ -71,6 +79,10 @@ class Job:
     turns: list[tuple[float, float, int]] | None = None
     names: dict[str, str] = field(default_factory=dict)
     unmatched: list[str] = field(default_factory=list)
+    # "running" comes back by itself after a restart; "stopped" waits to be asked.
+    state: str = "running"
+    thread_id: str = ""
+    had_samples: bool = False
 
 
 @dataclass
@@ -90,6 +102,36 @@ class Env:
 class Stopped(Exception):
     """The job can't go on for now. The message is for the person, and it never
     carries transcript text."""
+
+
+def measure(path: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> float | None:
+    """A recording's length by decoding it, for files whose header doesn't say. None
+    if that can't be told. Reads the whole file, so only use it when probing failed."""
+    try:
+        done = run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-protocol_whitelist", "file", "-format_whitelist",
+             AUDIO_DEMUXERS, "-i", path, "-vn", "-f", "null", "-"],
+            capture_output=True, timeout=MEASURE_TIMEOUT_S, env=_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = done.stderr.decode("utf-8", "replace") if isinstance(done.stderr, bytes) else str(done.stderr or "")
+    times = _DECODED.findall(text)
+    if done.returncode != 0 or not times:
+        return None
+    hours, minutes, seconds = times[-1]
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _flac_seconds(path: Path, run: Callable[..., subprocess.CompletedProcess]) -> float | None:
+    try:
+        done = run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+            capture_output=True, timeout=120, env=_env(),
+        )
+        return float(done.stdout.decode().strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None
 
 
 def silences(source: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> list[float]:
@@ -193,15 +235,26 @@ def sweep(now: Callable[[], float] = time.time) -> None:
 
 
 def latest_for(platform: str, chat_id: str) -> Job | None:
-    home = jobs_home()
-    if not home.is_dir():
-        return None
-    folders = sorted(home.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
-    for folder in folders:
-        job = load(folder)
-        if job and job.platform == platform and job.chat_id == chat_id:
+    sweep()
+    for job in sorted(_all_jobs(), key=_age):
+        if job.platform == platform and job.chat_id == chat_id:
             return job
     return None
+
+
+def _age(job: Job) -> float:
+    try:
+        return -(_folder(job) / JOB_FILE).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _all_jobs() -> list[Job]:
+    try:
+        folders = list(jobs_home().iterdir())
+    except OSError:
+        return []
+    return [job for job in (load(folder) for folder in folders) if job]
 
 
 def _cut(job: Job, index: int, run: Callable[..., subprocess.CompletedProcess]) -> Path:
@@ -211,11 +264,13 @@ def _cut(job: Job, index: int, run: Callable[..., subprocess.CompletedProcess]) 
     if dest.is_file():
         return dest
     temporary = dest.with_suffix(".tmp.flac")
+    # The last part runs to the end of the audio, whatever the length was thought to be.
+    to_end = [] if index == len(job.parts) - 1 else ["-t", f"{end - start:.3f}"]
     try:
         done = run(
             ["ffmpeg", "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-format_whitelist",
-             AUDIO_DEMUXERS, "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i",
-             str(_folder(job) / job.source), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", str(temporary)],
+             AUDIO_DEMUXERS, "-ss", f"{start:.3f}", "-i", str(_folder(job) / job.source), *to_end,
+             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", str(temporary)],
             capture_output=True, timeout=TOOL_TIMEOUT_S, env=_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -267,14 +322,20 @@ def _transcribe(job: Job, env: Env) -> list[Timed]:
             try:
                 job.tasks[index] = env.papareo.start_task(str(part))
             except PapareoError as e:
-                raise Stopped(f"Papa Reo wouldn't take part {index + 1} of {total}. {RESUME_HINT}") from e
+                raise Stopped(
+                    f"Sending part {index + 1} of {total} to Papa Reo failed. Ask me to resume and I'll send it again. "
+                    "If Papa Reo had already received it, that part could be charged twice. Other finished parts aren't."
+                ) from e
             save(job)
         try:
             results.append(env.papareo.finish_task(job.tasks[index]))
         except TaskFailed as e:
             job.tasks[index] = None
             save(job)
-            raise Stopped(f"Papa Reo couldn't do part {index + 1} of {total}. {RESUME_HINT}") from e
+            raise Stopped(
+                f"Papa Reo reports that part {index + 1} of {total} failed. Ask me to resume and I'll send it again, "
+                "which may be charged. Other finished parts aren't."
+            ) from e
         except PapareoError as e:
             raise Stopped(f"I lost touch with Papa Reo on part {index + 1} of {total}. {RESUME_HINT}") from e
         (_folder(job) / f"part-{index}.flac").unlink(missing_ok=True)
@@ -298,9 +359,24 @@ def _join(job: Job, results: Sequence[Timed]) -> tuple[str, tuple[Cue, ...], tup
     return " ".join(words), tuple(cues), tuple(hints)
 
 
+def _notes(job: Job, env: Env, results: Sequence[Timed]) -> str:
+    """What the person should know about this file. Names and counts only."""
+    notes = []
+    if job.unmatched:
+        notes.append(f"Couldn't match these voice clips to anyone: {', '.join(job.unmatched)}.")
+    if job.had_samples and not env.samples and not job.names and not job.unmatched:
+        notes.append("Voice clips were lost in a restart, so speakers are numbered, not named.")
+    rough = sum(1 for r in results if r.text.strip() and not r.cues)
+    if job.speakers and rough:
+        notes.append(f"Papa Reo gave no timings for {rough} part(s), so their speaker labels are rough.")
+    return " ".join(notes)
+
+
 def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], caption: str) -> None:
     """The whole job. Tells the person how it ended, and logs counts only."""
     try:
+        job.state = "running"
+        save(job)
         if job.speakers and job.turns is None:
             try:
                 _separate(job, env)
@@ -313,8 +389,13 @@ def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], c
                 return
             if env.samples_used:
                 env.samples_used()
+            if not job.turns:
+                forget(job)
+                env.say("No speech was found in that recording, so Papa Reo wasn't used and nothing was spent.")
+                return
         results = _transcribe(job, env)
         text, cues, hints = _join(job, results)
+        notes = _notes(job, env, results)
         del results
         if not text:
             forget(job)
@@ -328,9 +409,11 @@ def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], c
         laid_out, _, _ = lay_out(cues, text, diarized, hints)
         del text, cues, hints
         try:
-            env.attach(job.filename, with_footer(laid_out).decode("utf-8"), caption)
+            env.attach(job.filename, with_footer(laid_out).decode("utf-8"), f"{caption} {notes}".strip())
         except Exception as e:  # noqa: BLE001 - only the type: it could echo what it was sent
             logger.warning("papareo_transcribe: long job couldn't attach: %s", type(e).__name__)
+            job.state = "stopped"
+            save(job)
             env.say(
                 "The transcript is done, but sending the file reported a problem. A group send can reach "
                 f"people and still report that, so check if it arrived. If it didn't: {RESUME_HINT}"
@@ -340,9 +423,11 @@ def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], c
         forget(job)
     except Stopped as e:
         logger.warning("papareo_transcribe: long job stopped after %d parts", sum(t is not None for t in job.tasks))
+        _mark_stopped(job)
         env.say(str(e))
     except Exception as e:  # noqa: BLE001
         logger.warning("papareo_transcribe: long job failed: %s", type(e).__name__)
+        _mark_stopped(job)
         env.say(f"The transcript stopped because of an unexpected problem. {RESUME_HINT}")
 
 
@@ -412,27 +497,104 @@ def start(work: Callable[[], None], spawn: Callable[[Callable[[], None]], None] 
     return True
 
 
+def _mark_stopped(job: Job) -> None:
+    job.state = "stopped"
+    try:
+        save(job)
+    except OSError:
+        logger.warning("papareo_transcribe: couldn't save a stopped job")
+
+
 def is_busy() -> bool:
     return _busy.locked()
 
 
-def new_job(
-    path: str, duration: float, platform: str, chat_id: str, filename: str, speakers: bool,
-    num_speakers: int | None, take: Callable[[str, str], Any], run: Callable[..., subprocess.CompletedProcess],
-) -> Job:
+def reserve(path: str, take: Callable[[str, str], Any]) -> Path:
+    """A private folder holding the recording. It has no job file until prepared, so
+    it can't be resumed, and it's swept if nothing comes of it. Done during the turn,
+    while the recording still exists."""
     sweep()
     home = jobs_home()
     home.mkdir(parents=True, exist_ok=True)
-    job_id = uuid.uuid4().hex
-    folder = home / job_id
+    folder = home / uuid.uuid4().hex
     folder.mkdir(mode=0o700)
     try:
-        source = "source" + Path(path).suffix[:8]
-        take(path, str(folder / source))
-        parts = plan_parts(duration, silences(str(folder / source), run))
-        job = Job(job_id, platform, chat_id, filename, source, speakers, num_speakers, parts, [None] * len(parts))
-        save(job)
-        return job
+        take(path, str(folder / ("original" + Path(path).suffix[:8])))
     except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
         raise
+    return folder
+
+
+def prepare(
+    folder: Path, duration: float, platform: str, chat_id: str, filename: str, speakers: bool, num_speakers: int | None,
+    thread_id: str = "", had_samples: bool = False,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> Job:
+    """Decode to one FLAC, find its true length and quiet moments, and write the job.
+    Raises Stopped, leaving nothing behind, if the recording can't be read."""
+    source = folder / SOURCE
+    original = next(folder.glob("original*"))
+    try:
+        done = run(
+            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-format_whitelist",
+             AUDIO_DEMUXERS, "-i", str(original), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", str(source)],
+            capture_output=True, timeout=TOOL_TIMEOUT_S, env=_env(),
+        )
+        if done.returncode != 0:
+            raise Stopped("I couldn't read that recording, so Papa Reo wasn't used and nothing was spent.")
+        original.unlink()
+        actual = _flac_seconds(source, run) or duration
+        if actual > MAX_JOB_S:
+            raise Stopped(f"That recording is over {int(MAX_JOB_S // 3600)} hours, so nothing was spent.")
+        parts = plan_parts(actual, silences(str(source), run))
+        job = Job(
+            folder.name, platform, chat_id, filename, SOURCE, speakers, num_speakers, parts, [None] * len(parts),
+            thread_id=thread_id, had_samples=had_samples,
+        )
+        save(job)
+        return job
+    except (OSError, subprocess.TimeoutExpired) as e:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise Stopped("I couldn't read that recording, so Papa Reo wasn't used and nothing was spent.") from e
+    except Stopped:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
+
+def running_jobs() -> list[Job]:
+    """Jobs that a restart interrupted."""
+    return [job for job in _all_jobs() if job.state == "running"]
+
+
+def recover(
+    bind: Callable[[Job], tuple[Callable[..., None], Callable[[str], None]]],
+    work: Callable[[Job, Callable[..., None], Callable[[str], None]], None],
+    spawn: Callable[[Callable[[], None]], None] | None = None,
+    wait: Callable[[float], None] = time.sleep,
+) -> None:
+    """Carry on after a restart: the person was told the file would come. Only in a
+    process that has a live chat adapter, which a passing CLI command doesn't."""
+    if not running_jobs():
+        return
+
+    def go() -> None:
+        for job in running_jobs():
+            senders = None
+            for _ in range(RECOVER_TRIES):
+                try:
+                    senders = bind(job)
+                    break
+                except Exception:  # noqa: BLE001 - the gateway isn't up yet, or never will be
+                    wait(RECOVER_WAIT_S)
+            if senders is None:
+                return
+            with _busy:
+                attach, say = senders
+                say("The agent restarted, so I'm carrying on with your transcript. Parts already done aren't paid for again.")
+                work(job, attach, say)
+
+    if spawn:
+        spawn(go)
+    else:
+        threading.Thread(target=go, name="papareo-recover", daemon=True).start()

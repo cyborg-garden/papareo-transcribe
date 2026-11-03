@@ -68,28 +68,34 @@ def session_platform() -> str | None:
     return get_session_env("HERMES_SESSION_PLATFORM", "") or None
 
 
-def _binding() -> tuple[Any, str, Any, Any]:
-    """This turn's adapter, chat, thread and gateway loop."""
+def _adapter_for(platform_name: str, profile: str | None) -> tuple[Any, Any]:
     from gateway.config import Platform  # type: ignore[import-not-found]
     from gateway.run import _gateway_runner_ref  # type: ignore[import-not-found]
+
+    runner = _gateway_runner_ref() if _gateway_runner_ref else None
+    if runner is None:
+        raise NoChat("no running gateway")
+    platform = Platform(platform_name)
+    lookup = getattr(runner, "_authorization_adapter", None)
+    adapter = lookup(platform, profile) if lookup else runner.adapters.get(platform)
+    if adapter is None:
+        raise NoChat(f"no live {platform_name} adapter")
+    return adapter, getattr(runner, "_gateway_loop", None)
+
+
+def _binding() -> tuple[Any, str, Any, Any]:
+    """This turn's adapter, chat, thread and gateway loop."""
     from gateway.session_context import get_session_env  # type: ignore[import-not-found]
 
     platform_name = get_session_env("HERMES_SESSION_PLATFORM", "")
     chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
     if not platform_name or not chat_id:
         raise NoChat("this turn is not bound to a chat")
-    runner = _gateway_runner_ref() if _gateway_runner_ref else None
-    if runner is None:
-        raise NoChat("no running gateway")
-    platform = Platform(platform_name)
     profile = get_session_env("HERMES_SESSION_PROFILE", "") or None
-    lookup = getattr(runner, "_authorization_adapter", None)
-    adapter = lookup(platform, profile) if lookup else runner.adapters.get(platform)
-    if adapter is None:
-        raise NoChat(f"no live {platform_name} adapter")
+    adapter, loop = _adapter_for(platform_name, profile)
     thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "")
     metadata = {"thread_id": thread_id} if thread_id else None
-    return adapter, chat_id, metadata, getattr(runner, "_gateway_loop", None)
+    return adapter, chat_id, metadata, loop
 
 
 def _sender() -> tuple[Any, Any]:
@@ -117,8 +123,17 @@ def bind() -> tuple[str, str, Any, Any]:
     """This chat, held for a background job that outlives the turn: its platform, its
     id, a way to attach a file, and a way to say something."""
     adapter, chat_id, metadata, loop = _binding()
-    platform = session_platform() or ""
+    attach, say = _senders(adapter, chat_id, metadata, loop)
+    return session_platform() or "", chat_id, attach, say
 
+
+def bind_chat(platform: str, chat_id: str, thread_id: str = "") -> tuple[Any, Any]:
+    """The same for a chat saved earlier, after a restart. Raises until the gateway is up."""
+    adapter, loop = _adapter_for(platform, None)
+    return _senders(adapter, chat_id, {"thread_id": thread_id} if thread_id else None, loop)
+
+
+def _senders(adapter: Any, chat_id: str, metadata: Any, loop: Any) -> tuple[Any, Any]:
     async def send(file_path: str, caption: str | None) -> Any:
         return await adapter.send_document(chat_id, file_path, caption=caption, metadata=metadata)
 
@@ -127,11 +142,13 @@ def bind() -> tuple[str, str, Any, Any]:
 
     def say(message: str) -> None:
         try:
-            _run(adapter.send(chat_id, message, metadata=metadata), loop)
+            result = _run(adapter.send(chat_id, message, metadata=metadata), loop)
+            if not getattr(result, "success", True):
+                logger.warning("papareo_transcribe: a job message wasn't delivered")
         except Exception as e:  # noqa: BLE001 - nothing more can be done, and the job must still end
             logger.warning("papareo_transcribe: couldn't send a job message: %s", type(e).__name__)
 
-    return platform, chat_id, attach, say
+    return attach, say
 
 
 def _send_file(send: Any, loop: Any, filename: str, text: str, caption: str | None) -> None:

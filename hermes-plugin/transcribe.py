@@ -105,7 +105,7 @@ def _caption(source: str, note: str | None = None) -> str:
     return f"Transcript ({source}). {note}" if note else f"Transcript ({source})"
 
 
-def check_path(path: str, is_audio: Callable[[str], bool] | None = None) -> str | None:
+def check_path(path: str, is_audio: Callable[[str], bool] | None = None, max_bytes: int = MAX_BYTES) -> str | None:
     p = Path(path)
     if not path or not p.is_file():
         return "no recording at that path"
@@ -113,7 +113,7 @@ def check_path(path: str, is_audio: Callable[[str], bool] | None = None) -> str 
     # an unknown extension is checked by content before it is refused.
     if p.suffix.lower() not in SUPPORTED and not (is_audio and _safe(is_audio, path)):
         return f"not a recording this can read ({p.suffix or 'no extension'}, and no audio found in it)"
-    if p.stat().st_size > MAX_BYTES:
+    if p.stat().st_size > max_bytes:
         return "recording is too large"
     return None
 
