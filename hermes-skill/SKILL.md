@@ -49,7 +49,7 @@ To put names on the labels, they can send a short clip of each person. Pass thos
 
 ## Long recordings
 
-A Papa Reo recording over an hour runs in the background, in parts, up to 48 hours or 4GB. Links are the way to send these, because Signal stops at 100MB. Call as usual. The first answer has `needs_agreement`: tell them what it says and only call again with `long_job_ok: true` once they agree. If they want speakers it needs `num_speakers`, so ask. After that the file arrives by itself, however long it takes, and you don't need to do anything. Speaker numbers across parts are matched by machine and can slip.
+A Papa Reo recording over an hour runs in the background, in parts, up to 36 hours or 4GB. Links are the way to send these, because Signal stops at 100MB. Call as usual. The first answer has `needs_agreement`: tell them what it says and only call again with `long_job_ok: true` once they agree. If they want speakers it needs `num_speakers`, so ask. After that the file arrives by itself, however long it takes, and you don't need to do anything. Speaker numbers across parts are matched by machine and can slip.
 
 If a job stops, it says so in the chat. When they ask to carry on, call with only `engine`, `chosen_by_person` and `resume_job: true`. Parts already done aren't paid for again. If they ask about one that seems to have vanished, because the agent restarted, try the same thing.
 

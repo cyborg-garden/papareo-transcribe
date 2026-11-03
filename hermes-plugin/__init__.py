@@ -50,6 +50,8 @@ COMPLIANT_ENV = "PAPAREO_KAITIAKITANGA_COMPLIANT"
 # transcripts are attached to the chat directly (e.g. "signal"). Not a secret.
 DIRECT_ENV = "PAPAREO_DIRECT_PLATFORMS"
 MAX_SPEAKERS = 32
+DIRECT_ONLY = "long recordings can only be sent back where Papa Reo files may be attached directly"
+CANT_MEASURE = "I couldn't tell how long that recording is, so nothing was spent. It may be damaged: ask them to check it plays"
 
 SCHEMA: dict[str, Any] = {
     "name": "transcribe_recording",
@@ -255,17 +257,25 @@ def register(ctx: Any) -> None:
 
     def resume() -> dict:
         if not transcribe.direct_ok(deps):
-            return {"sent": False, "error": "long recordings can only be sent back where Papa Reo files may be attached directly"}
+            return {"sent": False, "error": DIRECT_ONLY}
         try:
-            platform, chat_id, attach, say = deliver.bind()
+            chat = deliver.bind()
         except Exception:  # noqa: BLE001
             return {"sent": False, "error": "this conversation has no chat to send to"}
-        job = longjob.latest_for(platform, chat_id)
-        if job is None:
-            return {"sent": False, "error": "there is no stopped long job for this chat"}
-        if not longjob.start(lambda: run_long(job, job_env({}, attach, say))):
+        if longjob.is_busy():
             return {"sent": False, "error": longjob.BUSY}
-        return {"sent": False, "started": True, "parts": len(job.parts), "next": longjob.NEXT_STARTED}
+        if longjob.latest_for(chat.platform, chat.chat_id) is None:
+            return {"sent": False, "error": "there is no stopped long job for this chat"}
+
+        def work() -> None:
+            # Read again inside the lock: it may have finished in between.
+            job = longjob.latest_for(chat.platform, chat.chat_id)
+            if job is not None:
+                run_long(job, job_env({}, chat.attach, chat.say))
+
+        if not longjob.start(work):
+            return {"sent": False, "error": longjob.BUSY}
+        return {"sent": False, "started": True, "next": longjob.NEXT_STARTED}
 
     def begin_long(
         path: str, duration: float, speakers: bool, count: int | None, samples: dict[str, str], agreed: bool, ours: bool
@@ -278,29 +288,23 @@ def register(ctx: Any) -> None:
         if not agreed:
             return longjob.confirmation(duration)
         try:
-            platform, chat_id, attach, say = deliver.bind()
+            chat = deliver.bind()
         except Exception:  # noqa: BLE001
             return {"sent": False, "error": "this conversation has no chat to send to"}
-        filename = deliver.filename_for(path, deps.now())
-        folder = longjob.reserve(path, shutil.move if ours else shutil.copyfile)
-        env = job_env(samples, attach, say, path)
-
-        def work() -> None:
-            try:
-                job = longjob.prepare(folder, duration, platform, chat_id, filename, speakers, count, had_samples=bool(samples))
-            except longjob.Stopped as e:
-                say(str(e))
-                return
-            run_long(job, env)
-
-        if not longjob.start(work):
-            shutil.rmtree(folder, ignore_errors=True)
+        job = longjob.reserve(
+            path, duration, chat.platform, chat.chat_id, deliver.filename_for(path, deps.now()), speakers, count,
+            shutil.move if ours else shutil.copyfile, chat.thread_id, chat.profile, bool(samples),
+        )
+        env = job_env(samples, chat.attach, chat.say, path)
+        if not longjob.start(lambda: run_long(job, env)):
+            longjob.forget(job)
             return {"sent": False, "error": longjob.BUSY}
         return {"sent": False, "started": True, "next": longjob.NEXT_STARTED}
 
     longjob.recover(
-        lambda job: deliver.bind_chat(job.platform, job.chat_id, job.thread_id),
+        lambda job: deliver.bind_chat(job.platform, job.chat_id, job.thread_id, job.profile),
         lambda job, attach, say: run_long(job, job_env({}, attach, say)),
+        lambda job: papareo.configured and job.platform in direct,
     )
 
     def handle(args: dict[str, Any], **_: Any) -> str:
@@ -339,7 +343,10 @@ def register(ctx: Any) -> None:
 
             if engine == "papareo" and not transcribe.check_path(path, has_audio, longjob.MAX_BYTES):
                 seconds = _length(path)
-                if seconds is not None and seconds > longjob.LONG_AFTER_S:
+                if seconds is None:
+                    # It might be long, and long ones need agreement, so it isn't paid for.
+                    return json.dumps({"sent": False, "error": CANT_MEASURE}, ensure_ascii=False)
+                if seconds > longjob.LONG_AFTER_S:
                     agreed = args.get("long_job_ok") is True or str(args.get("long_job_ok")).lower() == "true"
                     return json.dumps(
                         begin_long(path, seconds, wanted or bool(samples) or bool(count), count, samples, agreed, bool(tmp)),

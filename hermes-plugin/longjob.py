@@ -5,16 +5,17 @@ It runs in the background, so nothing depends on one chat turn lasting for hours
 Speakers are separated before anything is paid for, as they are for short
 recordings. Voice vectors stay in memory for that stage and are then dropped.
 
-The recording is first turned into one 16 kHz mono FLAC, so every cut lands on an
+The recording is first turned into one 16 kHz mono WAV, so every cut lands on an
 exact sample whatever the original format was, and its real length is known.
 
-On disk, in a private folder until the job ends: that FLAC, its cut points, Papa
+On disk, in a private folder until the job ends: that WAV, its cut points, Papa
 Reo task ids, and who spoke when. Transcript text and voice vectors never go
 there: a resumed job downloads the text again by task id, which costs nothing.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import math
@@ -25,6 +26,7 @@ import subprocess
 import threading
 import time
 import uuid
+import wave
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -38,14 +40,16 @@ logger = logging.getLogger(__name__)
 LONG_AFTER_S = 60 * 60.0
 CHUNK_S = 30 * 60.0
 CUT_WINDOW_S = 3 * 60.0
-MAX_JOB_S = 48 * 60 * 60.0
+# A WAV stops at 4GB, which at this rate is a little over 37 hours.
+MAX_JOB_S = 36 * 60 * 60.0
 MAX_BYTES = 4 * 1024 * 1024 * 1024
 KEEP_S = 7 * 24 * 60 * 60.0
 # Cosine similarity for "the same person as in an earlier part".
 LINK_THRESHOLD = 0.45
 SILENCE_FILTER = "silencedetect=noise=-35dB:d=0.4"
 TOOL_TIMEOUT_S = 2 * 60 * 60.0
-SOURCE = "source.flac"
+SOURCE = "source.wav"
+LOCK_FILE = ".running.lock"
 HOME_ENV = "PAPAREO_JOBS_HOME"
 JOB_FILE = "job.json"
 RECOVER_TRIES = 60
@@ -55,7 +59,6 @@ RESUME_HINT = "Ask me to resume the transcript and I'll carry on. Parts already 
 MEASURE_TIMEOUT_S = 20 * 60.0
 _DECODED = re.compile(r"time=(\d+):(\d\d):(\d\d(?:\.\d+)?)")
 _SILENCE_END = re.compile(r"silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)")
-_busy = threading.Lock()
 
 
 def jobs_home() -> Path:
@@ -82,7 +85,10 @@ class Job:
     # "running" comes back by itself after a restart; "stopped" waits to be asked.
     state: str = "running"
     thread_id: str = ""
+    profile: str = ""
     had_samples: bool = False
+    # What the header claimed. The parts come from the decoded length, once known.
+    expected_s: float = 0.0
 
 
 @dataclass
@@ -121,17 +127,6 @@ def measure(path: str, run: Callable[..., subprocess.CompletedProcess] = subproc
         return None
     hours, minutes, seconds = times[-1]
     return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-
-
-def _flac_seconds(path: Path, run: Callable[..., subprocess.CompletedProcess]) -> float | None:
-    try:
-        done = run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
-            capture_output=True, timeout=120, env=_env(),
-        )
-        return float(done.stdout.decode().strip())
-    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
-        return None
 
 
 def silences(source: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> list[float]:
@@ -258,25 +253,42 @@ def _all_jobs() -> list[Job]:
 
 
 def _cut(job: Job, index: int, run: Callable[..., subprocess.CompletedProcess]) -> Path:
-    """One part as 16 kHz mono FLAC: lossless at the rate the recogniser reads."""
+    """One part as FLAC. The samples are copied out of the WAV by position, so parts
+    neither lose nor repeat any, with no seeking inside ffmpeg."""
     start, end = job.parts[index]
     dest = _folder(job) / f"part-{index}.flac"
     if dest.is_file():
         return dest
+    piece = dest.with_suffix(".tmp.wav")
     temporary = dest.with_suffix(".tmp.flac")
-    # The last part runs to the end of the audio, whatever the length was thought to be.
-    to_end = [] if index == len(job.parts) - 1 else ["-t", f"{end - start:.3f}"]
+    last = index == len(job.parts) - 1
     try:
+        with wave.open(str(_folder(job) / job.source), "rb") as source:
+            rate = source.getframerate()
+            first = int(start * rate)
+            left = source.getnframes() - first if last else int(end * rate) - first
+            source.setpos(min(first, source.getnframes()))
+            with wave.open(str(piece), "wb") as out:
+                out.setnchannels(source.getnchannels())
+                out.setsampwidth(source.getsampwidth())
+                out.setframerate(rate)
+                while left > 0:
+                    block = source.readframes(min(left, rate * 60))
+                    if not block:
+                        break
+                    out.writeframes(block)
+                    left -= len(block) // (source.getsampwidth() * source.getnchannels())
         done = run(
-            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-format_whitelist",
-             AUDIO_DEMUXERS, "-ss", f"{start:.3f}", "-i", str(_folder(job) / job.source), *to_end,
-             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", str(temporary)],
+            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-f", "wav", "-i", str(piece),
+             "-c:a", "flac", str(temporary)],
             capture_output=True, timeout=TOOL_TIMEOUT_S, env=_env(),
         )
-    except (OSError, subprocess.TimeoutExpired) as e:
+        if done.returncode != 0:
+            raise OSError("ffmpeg failed")
+    except (OSError, EOFError, wave.Error, subprocess.TimeoutExpired) as e:
         raise Stopped(f"I couldn't cut part {index + 1} of the recording. {RESUME_HINT}") from e
-    if done.returncode != 0:
-        raise Stopped(f"I couldn't cut part {index + 1} of the recording. {RESUME_HINT}")
+    finally:
+        piece.unlink(missing_ok=True)
     temporary.replace(dest)
     return dest
 
@@ -377,6 +389,13 @@ def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], c
     try:
         job.state = "running"
         save(job)
+        if not job.parts:
+            try:
+                prepare(job, env.run)
+            except Stopped as e:
+                forget(job)
+                env.say(str(e))
+                return
         if job.speakers and job.turns is None:
             try:
                 _separate(job, env)
@@ -475,16 +494,36 @@ def confirmation(duration: float) -> dict[str, Any]:
     }
 
 
+def _take_lock() -> Any | None:
+    """One job at a time on this agent. A file lock, because the gateway re-imports
+    plugins while running, which would give a module-level lock a second copy. Freed
+    by the system if the process dies."""
+    home = jobs_home()
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+        handle = open(home / LOCK_FILE, "w")  # noqa: SIM115 - held for the whole job
+    except OSError:
+        logger.warning("papareo_transcribe: the long job folder can't be written")
+        return None
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+    except OSError:
+        handle.close()
+        return None
+
+
 def start(work: Callable[[], None], spawn: Callable[[Callable[[], None]], None] | None = None) -> bool:
-    """Run work in the background, one job at a time. False if one is running."""
-    if not _busy.acquire(blocking=False):
+    """Run work in the background. False if a job is already running."""
+    lock = _take_lock()
+    if lock is None:
         return False
 
     def guarded() -> None:
         try:
             work()
         finally:
-            _busy.release()
+            lock.close()
 
     try:
         if spawn:
@@ -492,7 +531,7 @@ def start(work: Callable[[], None], spawn: Callable[[Callable[[], None]], None] 
         else:
             threading.Thread(target=guarded, name="papareo-long-job", daemon=True).start()
     except Exception:
-        _busy.release()
+        lock.close()
         raise
     return True
 
@@ -506,60 +545,68 @@ def _mark_stopped(job: Job) -> None:
 
 
 def is_busy() -> bool:
-    return _busy.locked()
+    lock = _take_lock()
+    if lock is None:
+        return True
+    lock.close()
+    return False
 
 
-def reserve(path: str, take: Callable[[str, str], Any]) -> Path:
-    """A private folder holding the recording. It has no job file until prepared, so
-    it can't be resumed, and it's swept if nothing comes of it. Done during the turn,
-    while the recording still exists."""
+def reserve(
+    path: str, duration: float, platform: str, chat_id: str, filename: str, speakers: bool, num_speakers: int | None,
+    take: Callable[[str, str], Any], thread_id: str = "", profile: str = "", had_samples: bool = False,
+) -> Job:
+    """A private folder holding the recording, and a job that says whose it is, so a
+    restart before it's prepared can still carry on. Done during the turn, while the
+    recording still exists."""
     sweep()
     home = jobs_home()
     home.mkdir(parents=True, exist_ok=True)
-    folder = home / uuid.uuid4().hex
+    job = Job(
+        uuid.uuid4().hex, platform, chat_id, filename, "original" + Path(path).suffix[:8], speakers, num_speakers,
+        [], [], thread_id=thread_id, profile=profile, had_samples=had_samples, expected_s=duration,
+    )
+    folder = _folder(job)
     folder.mkdir(mode=0o700)
     try:
-        take(path, str(folder / ("original" + Path(path).suffix[:8])))
+        take(path, str(folder / job.source))
+        save(job)
     except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
         raise
-    return folder
+    return job
 
 
-def prepare(
-    folder: Path, duration: float, platform: str, chat_id: str, filename: str, speakers: bool, num_speakers: int | None,
-    thread_id: str = "", had_samples: bool = False,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-) -> Job:
-    """Decode to one FLAC, find its true length and quiet moments, and write the job.
-    Raises Stopped, leaving nothing behind, if the recording can't be read."""
+def prepare(job: Job, run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> None:
+    """Decode to one WAV, find its true length and quiet moments, and plan the parts.
+    Raises Stopped if the recording can't be read or holds nothing."""
+    unreadable = "I couldn't read that recording, so Papa Reo wasn't used and nothing was spent."
+    folder = _folder(job)
+    original = folder / job.source
     source = folder / SOURCE
-    original = next(folder.glob("original*"))
     try:
         done = run(
             ["ffmpeg", "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-format_whitelist",
-             AUDIO_DEMUXERS, "-i", str(original), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", str(source)],
+             AUDIO_DEMUXERS, "-i", str(original), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+             "-f", "wav", str(source)],
             capture_output=True, timeout=TOOL_TIMEOUT_S, env=_env(),
         )
         if done.returncode != 0:
-            raise Stopped("I couldn't read that recording, so Papa Reo wasn't used and nothing was spent.")
-        original.unlink()
-        actual = _flac_seconds(source, run) or duration
-        if actual > MAX_JOB_S:
-            raise Stopped(f"That recording is over {int(MAX_JOB_S // 3600)} hours, so nothing was spent.")
-        parts = plan_parts(actual, silences(str(source), run))
-        job = Job(
-            folder.name, platform, chat_id, filename, SOURCE, speakers, num_speakers, parts, [None] * len(parts),
-            thread_id=thread_id, had_samples=had_samples,
-        )
-        save(job)
-        return job
-    except (OSError, subprocess.TimeoutExpired) as e:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise Stopped("I couldn't read that recording, so Papa Reo wasn't used and nothing was spent.") from e
-    except Stopped:
-        shutil.rmtree(folder, ignore_errors=True)
-        raise
+            raise Stopped(unreadable)
+        with wave.open(str(source), "rb") as decoded:
+            frames, rate = decoded.getnframes(), decoded.getframerate()
+    except (OSError, EOFError, wave.Error, subprocess.TimeoutExpired) as e:
+        raise Stopped(unreadable) from e
+    actual = frames / rate if rate else 0.0
+    if actual <= 0:
+        raise Stopped("There's no audio in that recording, so Papa Reo wasn't used and nothing was spent.")
+    if actual > MAX_JOB_S:
+        raise Stopped(f"That recording is over {int(MAX_JOB_S // 3600)} hours, so nothing was spent.")
+    job.parts = plan_parts(actual, silences(str(source), run))
+    job.tasks = [None] * len(job.parts)
+    job.source = SOURCE
+    save(job)
+    original.unlink(missing_ok=True)
 
 
 def running_jobs() -> list[Job]:
@@ -570,29 +617,50 @@ def running_jobs() -> list[Job]:
 def recover(
     bind: Callable[[Job], tuple[Callable[..., None], Callable[[str], None]]],
     work: Callable[[Job, Callable[..., None], Callable[[str], None]], None],
+    allowed: Callable[[Job], bool],
     spawn: Callable[[Callable[[], None]], None] | None = None,
     wait: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Carry on after a restart: the person was told the file would come. Only in a
-    process that has a live chat adapter, which a passing CLI command doesn't."""
-    if not running_jobs():
+    """Carry on after a restart: the person was told the file would come. A plugin
+    reload also lands here, so a job already running is left alone, and each job is
+    read again once the lock is held. Only a process with a live chat adapter gets
+    further than bind, which a passing CLI command doesn't."""
+    sweep()
+    if not running_jobs() or is_busy():
         return
 
     def go() -> None:
-        for job in running_jobs():
+        while True:
+            jobs = running_jobs()
+            if not jobs:
+                return
             senders = None
             for _ in range(RECOVER_TRIES):
                 try:
-                    senders = bind(job)
+                    senders = bind(jobs[0])
                     break
                 except Exception:  # noqa: BLE001 - the gateway isn't up yet, or never will be
                     wait(RECOVER_WAIT_S)
             if senders is None:
                 return
-            with _busy:
+            lock = _take_lock()
+            if lock is None:
+                return
+            try:
+                job = load(_folder(jobs[0]))
+                if job is None or job.state != "running":
+                    continue
                 attach, say = senders
+                if not allowed(job):
+                    _mark_stopped(job)
+                    say("I can't carry on with your transcript here any more, so it has stopped. Nothing more was spent.")
+                    continue
                 say("The agent restarted, so I'm carrying on with your transcript. Parts already done aren't paid for again.")
                 work(job, attach, say)
+            finally:
+                lock.close()
+            if load(_folder(job)) and load(_folder(job)).state == "running":
+                return
 
     if spawn:
         spawn(go)

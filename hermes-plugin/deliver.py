@@ -18,7 +18,7 @@ import tempfile
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -119,17 +119,30 @@ def send_local(filename: str, text: str, caption: str | None) -> None:
     _send_file(send, loop, filename, text, caption)
 
 
-def bind() -> tuple[str, str, Any, Any]:
-    """This chat, held for a background job that outlives the turn: its platform, its
-    id, a way to attach a file, and a way to say something."""
+class Bound(NamedTuple):
+    platform: str
+    chat_id: str
+    thread_id: str
+    profile: str
+    attach: Any
+    say: Any
+
+
+def bind() -> Bound:
+    """This chat, held for a background job that outlives the turn."""
+    from gateway.session_context import get_session_env  # type: ignore[import-not-found]
+
     adapter, chat_id, metadata, loop = _binding()
     attach, say = _senders(adapter, chat_id, metadata, loop)
-    return session_platform() or "", chat_id, attach, say
+    return Bound(
+        session_platform() or "", chat_id, get_session_env("HERMES_SESSION_THREAD_ID", "") or "",
+        get_session_env("HERMES_SESSION_PROFILE", "") or "", attach, say,
+    )
 
 
-def bind_chat(platform: str, chat_id: str, thread_id: str = "") -> tuple[Any, Any]:
+def bind_chat(platform: str, chat_id: str, thread_id: str = "", profile: str = "") -> tuple[Any, Any]:
     """The same for a chat saved earlier, after a restart. Raises until the gateway is up."""
-    adapter, loop = _adapter_for(platform, None)
+    adapter, loop = _adapter_for(platform, profile or None)
     return _senders(adapter, chat_id, {"thread_id": thread_id} if thread_id else None, loop)
 
 

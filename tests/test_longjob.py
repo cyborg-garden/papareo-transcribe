@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
+import wave
 from pathlib import Path
 
 import pytest
@@ -18,15 +20,25 @@ def lj(plugin, tmp_path, monkeypatch):
 
 
 cuts = []
+RATE = 16  # samples a second, so a whole fake recording is small
+
+
+def write_wav(path, seconds):
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(b"\0\0" * int(seconds * RATE))
 
 
 def fake_ffmpeg(cmd, **kw):
-    if cmd[0] == "ffprobe":
-        return subprocess.CompletedProcess(cmd, 0, b"4000\n", b"")
     if "null" in cmd:
         return subprocess.CompletedProcess(cmd, 0, b"", b"silence_end: 1810 | silence_duration: 2\n")
     cuts.append(cmd)
-    Path(cmd[-1]).write_bytes(b"flac")
+    if cmd[-1].endswith(".wav"):
+        write_wav(cmd[-1], 4000)
+    else:
+        shutil.copyfile(cmd[cmd.index("-i") + 1], cmd[-1])
     return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
 
@@ -58,8 +70,9 @@ class FakeClient:
 def world(plugin, lj, tmp_path, duration=4000.0, speakers=True, count=2, diarize=None, papareo=None, samples=None):
     sent, said, used = [], [], []
     (tmp_path / "r.m4a").write_bytes(b"audio")
-    folder = lj.reserve(str(tmp_path / "r.m4a"), lambda a, b: Path(b).write_bytes(Path(a).read_bytes()))
-    job = lj.prepare(folder, duration, "signal", "chat", "t.txt", speakers, count, run=fake_ffmpeg)
+    job = lj.reserve(str(tmp_path / "r.m4a"), duration, "signal", "chat", "t.txt", speakers, count,
+                     lambda a, b: Path(b).write_bytes(Path(a).read_bytes()))
+    lj.prepare(job, fake_ffmpeg)
     env = lj.Env(
         papareo=papareo or FakeClient(plugin), diarize=diarize,
         attach=lambda name, text, caption: sent.append(text), say=said.append,
@@ -333,7 +346,7 @@ def test_tool_asks_before_starting_and_starts_nothing(tool, lj, tmp_path):
     f = tmp_path / "r.m4a"
     f.write_bytes(b"x")
     answer = call(tool, f)
-    assert answer["needs_agreement"] and answer["sent"] is False and not lj.jobs_home().exists()
+    assert answer["needs_agreement"] and answer["sent"] is False and lj.latest_for("signal", "chat") is None
 
 
 def test_tool_asks_how_many_people_first(tool, tmp_path):
@@ -345,7 +358,7 @@ def test_tool_asks_how_many_people_first(tool, tmp_path):
 def test_tool_starts_once_agreed_and_keeps_the_original(plugin, tool, lj, tmp_path, monkeypatch):
     f = tmp_path / "r.m4a"
     f.write_bytes(b"x")
-    monkeypatch.setattr(plugin.deliver, "bind", lambda: ("signal", "chat", lambda *a: None, lambda m: None))
+    monkeypatch.setattr(plugin.deliver, "bind", lambda: plugin.deliver.Bound("signal", "chat", "", "", lambda *a: None, lambda m: None))
     monkeypatch.setattr(lj, "silences", lambda *a: [])
     monkeypatch.setattr(lj, "start", lambda work, spawn=None: True)
     answer = call(tool, f, long_job_ok=True)
@@ -353,7 +366,7 @@ def test_tool_starts_once_agreed_and_keeps_the_original(plugin, tool, lj, tmp_pa
 
 
 def test_tool_has_nothing_to_resume(plugin, tool, monkeypatch):
-    monkeypatch.setattr(plugin.deliver, "bind", lambda: ("signal", "chat", lambda *a: None, lambda m: None))
+    monkeypatch.setattr(plugin.deliver, "bind", lambda: plugin.deliver.Bound("signal", "chat", "", "", lambda *a: None, lambda m: None))
     assert "no stopped long job" in call(tool, "", resume_job=True)["error"]
 
 
@@ -372,7 +385,7 @@ def test_a_long_file_whose_header_is_silent_still_asks_first(plugin, tool, tmp_p
     assert call(tool, f)["needs_agreement"] is True
 
 
-def test_a_probe_that_crashes_does_not_break_the_short_flow(plugin, tool, tmp_path, monkeypatch):
+def test_a_length_that_cannot_be_told_is_not_paid_for(plugin, tool, tmp_path, monkeypatch):
     f = tmp_path / "r.m4a"
     f.write_bytes(b"x")
 
@@ -380,7 +393,7 @@ def test_a_probe_that_crashes_does_not_break_the_short_flow(plugin, tool, tmp_pa
         raise OSError("no ffprobe")
 
     monkeypatch.setattr(plugin, "probe_duration", broken)
-    assert "needs_agreement" not in call(tool, f)
+    assert "nothing was spent" in call(tool, f)["error"]
 
 
 def test_measure_reads_the_decoded_length(lj):
@@ -397,17 +410,21 @@ def test_measure_gives_up_cleanly(lj):
 def test_busy_leaves_nothing_that_could_be_paid_for_later(plugin, tool, lj, tmp_path, monkeypatch):
     f = tmp_path / "r.m4a"
     f.write_bytes(b"x")
-    monkeypatch.setattr(plugin.deliver, "bind", lambda: ("signal", "chat", lambda *a: None, lambda m: None))
+    monkeypatch.setattr(plugin.deliver, "bind", lambda: plugin.deliver.Bound("signal", "chat", "", "", lambda *a: None, lambda m: None))
     monkeypatch.setattr(lj, "start", lambda work, spawn=None: False)
     assert "another long" in call(tool, f, long_job_ok=True)["error"]
-    assert list(lj.jobs_home().iterdir()) == [] and lj.latest_for("signal", "chat") is None
+    assert lj.latest_for("signal", "chat") is None
 
 
-def test_a_reserved_folder_cannot_be_resumed(plugin, lj, tmp_path):
+def test_a_restart_before_preparing_still_carries_on(plugin, lj, tmp_path):
     f = tmp_path / "r.m4a"
     f.write_bytes(b"x")
-    lj.reserve(str(f), lambda a, b: Path(b).write_bytes(b"x"))
-    assert lj.latest_for("signal", "chat") is None
+    job = lj.reserve(str(f), 4000.0, "signal", "chat", "t.txt", False, None, lambda a, b: Path(b).write_bytes(b"x"))
+    client = FakeClient(plugin)
+    sent = []
+    env = lj.Env(papareo=client, diarize=None, attach=lambda n, t, c: sent.append(t), say=lambda m: None, run=fake_ffmpeg)
+    run(plugin, lj, lj.latest_for("signal", "chat"), env)
+    assert len(sent) == 1 and client.started and not (lj.jobs_home() / job.id).exists()
 
 
 def test_resume_refuses_where_direct_delivery_was_removed(plugin, tool, monkeypatch):
@@ -422,28 +439,58 @@ def test_resume_refuses_where_direct_delivery_was_removed(plugin, tool, monkeypa
     assert "attached directly" in call(registered[0]["handler"], "", resume_job=True)["error"]
 
 
-def test_the_last_part_runs_to_the_end_and_the_others_are_exact(plugin, lj, tmp_path):
-    cuts.clear()
+def test_parts_hold_every_sample_exactly_once(plugin, lj, tmp_path):
     job, env, *_ = world(plugin, lj, tmp_path, speakers=False, count=None)
-    run(plugin, lj, job, env)
-    parts = [c for c in cuts if "-ss" in c]
-    assert len(parts) == len(job.parts) and "-t" in parts[0] and "-t" not in parts[-1]
-    assert parts[0][parts[0].index("-i") + 1].endswith(lj.SOURCE)
+    source = lj.jobs_home() / job.id / job.source
+    with wave.open(str(source), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(b"".join(i.to_bytes(2, "little") for i in range(4000 * RATE % 60000)) * (4000 * RATE // 60000 + 1))
+    with wave.open(str(source)) as w:
+        everything = w.readframes(w.getnframes())
+
+    def keep_wav(cmd, **kw):
+        shutil.copyfile(cmd[cmd.index("-i") + 1], cmd[-1])
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    joined = b""
+    for index in range(len(job.parts)):
+        with wave.open(str(lj._cut(job, index, keep_wav))) as w:
+            joined += w.readframes(w.getnframes())
+    assert joined == everything and len(job.parts) > 1
 
 
 def test_the_true_length_decides_the_parts(plugin, lj, tmp_path):
     job, *_ = world(plugin, lj, tmp_path, duration=99999.0)
-    assert job.parts[-1][1] == 4000.0
+    assert job.parts[-1][1] == 4000.0 and job.source == lj.SOURCE
 
 
 def test_an_unreadable_recording_stops_with_nothing_left(plugin, lj, tmp_path):
     f = tmp_path / "r.m4a"
     f.write_bytes(b"x")
-    folder = lj.reserve(str(f), lambda a, b: Path(b).write_bytes(b"x"))
-    with pytest.raises(lj.Stopped, match="nothing was spent"):
-        lj.prepare(folder, 4000.0, "signal", "chat", "t.txt", False, None,
-                   run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, b"", b""))
-    assert not folder.exists()
+    job = lj.reserve(str(f), 4000.0, "signal", "chat", "t.txt", False, None, lambda a, b: Path(b).write_bytes(b"x"))
+    client = FakeClient(plugin)
+    said = []
+    env = lj.Env(papareo=client, diarize=None, attach=lambda *a: None, say=said.append,
+                 run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, b"", b""))
+    run(plugin, lj, job, env)
+    assert "nothing was spent" in said[0] and not client.started and not (lj.jobs_home() / job.id).exists()
+
+
+def test_a_recording_with_no_audio_is_not_paid_for(plugin, lj, tmp_path):
+    f = tmp_path / "r.m4a"
+    f.write_bytes(b"x")
+    job = lj.reserve(str(f), 4000.0, "signal", "chat", "t.txt", False, None, lambda a, b: Path(b).write_bytes(b"x"))
+
+    def empty(cmd, **kw):
+        write_wav(cmd[-1], 0)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    client = FakeClient(plugin)
+    said = []
+    run(plugin, lj, job, lj.Env(papareo=client, diarize=None, attach=lambda *a: None, say=said.append, run=empty))
+    assert "no audio" in said[0] and not client.started
 
 
 def test_a_recording_with_no_speech_is_not_paid_for(plugin, lj, tmp_path):
@@ -488,12 +535,58 @@ def test_a_part_without_timings_is_reported(plugin, lj, tmp_path):
     assert "no timings" in captions[0] and SECRET not in captions[0]
 
 
+def recover(lj, bind, work, allowed=lambda job: True):
+    lj.recover(bind, work, allowed, spawn=lambda go: go(), wait=lambda s: None)
+
+
 def test_a_restart_carries_on_and_says_so(plugin, lj, tmp_path):
     job, *_ = world(plugin, lj, tmp_path, speakers=False, count=None)
     ran, said = [], []
-    lj.recover(lambda j: (lambda *a: None, said.append), lambda j, attach, say: ran.append(j.id),
-               spawn=lambda go: go(), wait=lambda s: None)
+
+    def work(j, attach, say):
+        ran.append(j.id)
+        lj.forget(j)
+
+    recover(lj, lambda j: (lambda *a: None, said.append), work)
     assert ran == [job.id] and "restarted" in said[0] and not lj.is_busy()
+
+
+def test_a_reload_during_a_running_job_does_nothing(plugin, lj, tmp_path):
+    world(plugin, lj, tmp_path, speakers=False, count=None)
+    lock = lj._take_lock()
+    ran = []
+    try:
+        recover(lj, lambda j: (lambda *a: None, lambda m: None), lambda *a: ran.append(1))
+    finally:
+        lock.close()
+    assert ran == []
+
+
+def test_a_job_that_finished_while_waiting_is_not_run_again(plugin, lj, tmp_path):
+    job, *_ = world(plugin, lj, tmp_path, speakers=False, count=None)
+    ran = []
+
+    def bind(j):
+        lj.forget(job)  # it finished between the first look and taking the lock
+        return (lambda *a: None, lambda m: None)
+
+    recover(lj, bind, lambda *a: ran.append(1))
+    assert ran == []
+
+
+def test_recovery_refuses_where_direct_delivery_was_removed(plugin, lj, tmp_path):
+    job, *_ = world(plugin, lj, tmp_path, speakers=False, count=None)
+    ran, said = [], []
+    recover(lj, lambda j: (lambda *a: None, said.append), lambda *a: ran.append(1), allowed=lambda j: False)
+    assert ran == [] and "stopped" in said[0] and lj.latest_for("signal", "chat").state == "stopped"
+
+
+def test_a_job_keeps_its_thread_and_profile(lj, tmp_path):
+    f = tmp_path / "r.m4a"
+    f.write_bytes(b"x")
+    job = lj.reserve(str(f), 4000.0, "signal", "chat", "t.txt", False, None, lambda a, b: Path(b).write_bytes(b"x"), "th", "pr")
+    again = lj.latest_for("signal", "chat")
+    assert (again.thread_id, again.profile) == ("th", "pr") and again.id == job.id
 
 
 def test_a_stopped_job_waits_to_be_asked(plugin, lj, tmp_path):
@@ -511,8 +604,18 @@ def test_a_process_with_no_gateway_never_runs_a_job(plugin, lj, tmp_path, monkey
     def no_gateway(job):
         raise plugin.deliver.NoChat("no running gateway")
 
-    lj.recover(no_gateway, lambda *a: ran.append(1), spawn=lambda go: go(), wait=lambda s: None)
+    recover(lj, no_gateway, lambda *a: ran.append(1))
     assert ran == []
+
+
+def test_registering_sweeps_old_recordings(plugin, lj, tmp_path):
+    import os
+
+    job, *_ = world(plugin, lj, tmp_path, speakers=False, count=None)
+    os.utime(lj.jobs_home() / job.id, (1_000_000.0, 1_000_000.0))
+    ran = []
+    recover(lj, lambda j: (lambda *a: None, lambda m: None), lambda *a: ran.append(1))
+    assert ran == [] and not (lj.jobs_home() / job.id).exists()
 
 
 def test_a_vanishing_folder_does_not_crash_the_lookup(plugin, lj, tmp_path, monkeypatch):
