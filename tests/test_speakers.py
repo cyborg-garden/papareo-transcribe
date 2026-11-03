@@ -161,6 +161,14 @@ def test_a_very_long_cue_with_no_sentence_end_can_still_split(sp):
     assert len(got) == 2 and " ".join(c.text for c in got) == " ".join(words)
 
 
+def test_a_snap_cannot_jump_over_the_next_voice_change(sp):
+    C, T = sp.Cue, sp.Turn
+    words = [f"w{i}" for i in range(40)]
+    words[17] += "."
+    got = sp.split_at_turns([C(0, 40, " ".join(words))], [T(0, 11, 0), T(11, 14, 1), T(14, 40, 2)])
+    assert [len(c.text.split()) for c in got] == [11, 7, 22] and got[1].text.endswith("w17.")
+
+
 def test_a_brief_voice_change_goes_to_its_neighbour(sp):
     T = sp.Turn
     assert sp.steady([T(0, 10, 0), T(10, 11, 1), T(11, 20, 0)]) == (T(0, 20, 0),)

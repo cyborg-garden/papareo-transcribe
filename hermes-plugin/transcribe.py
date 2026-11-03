@@ -215,12 +215,14 @@ def _speaker_fields(cues: Any, diarized: Diarized | None) -> dict[str, Any]:
         return {}
     speakers = heard(cues, diarized) if cues else set()
     named = {diarized.names[s] for s in speakers if s in diarized.names}
-    not_found = {*diarized.unmatched, *(set(diarized.names.values()) - named)}
+    brief = set(diarized.names.values()) - named
     out: dict[str, Any] = {"speakers": len(speakers)}
     if named:
         out["named_speakers"] = sorted(named)
-    if not_found:
-        out["samples_not_matched"] = sorted(not_found)
+    if diarized.unmatched:
+        out["samples_not_matched"] = sorted(diarized.unmatched)
+    if brief:
+        out["samples_matched_too_briefly"] = sorted(brief)
     return out
 
 

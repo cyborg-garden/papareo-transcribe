@@ -213,11 +213,11 @@ def _share_before(cue: Cue, at: float, hints: Sequence[Cue]) -> float:
     return (at - cue.start) / span if span > 0 else 0.0
 
 
-def _stop_for(words: Sequence[str], wanted: int, edge: int) -> int | None:
-    """Where to end the words before a voice change: the nearest sentence end, or
-    None to leave the sentence whole."""
+def _stop_for(words: Sequence[str], wanted: int, edge: int, limit: int) -> int | None:
+    """Where to end the words before a voice change: the nearest sentence end before
+    the next change, or None to leave the sentence whole."""
     ends = [
-        k for k in range(edge + 1, len(words))
+        k for k in range(edge + 1, min(limit, len(words) - 1) + 1)
         if abs(k - wanted) <= SNAP_WORDS and words[k - 1].endswith(_SENTENCE_END)
     ]
     if ends:
@@ -238,9 +238,10 @@ def split_at_turns(cues: Sequence[Cue], turns: Sequence[Turn], hints: Sequence[C
         words = cue.text.split()
         edge, start = 0, pieces[0].start if pieces else cue.start
         parts: list[Cue] = []
-        for previous, piece in zip(pieces, pieces[1:]):
-            wanted = round(_share_before(cue, piece.start, hints) * len(words))
-            stop = _stop_for(words, wanted, edge)
+        wants = [round(_share_before(cue, piece.start, hints) * len(words)) for piece in pieces[1:]]
+        for index, (previous, piece) in enumerate(zip(pieces, pieces[1:])):
+            limit = wants[index + 1] if index + 1 < len(wants) else len(words) - 1
+            stop = _stop_for(words, wants[index], edge, limit)
             if stop is not None:
                 parts.append(Cue(start, previous.end, " ".join(words[edge:stop])))
                 edge, start = stop, piece.start
