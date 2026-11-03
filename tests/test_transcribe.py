@@ -646,10 +646,10 @@ def test_paid_but_lost_tells_the_agent_it_was_charged(plugin, memo):
 def test_a_shared_cue_is_split_between_speakers_in_the_file(plugin, memo):
     sp = plugin.speakers
     w, deps = _timed_world(plugin, lambda *a: sp.Diarized((sp.Turn(0, 2, 0), sp.Turn(2, 4, 1))))
-    w.papareo.cues = (sp.Cue(0, 4, "one two three four"),)
+    w.papareo.cues = (sp.Cue(0, 4, "one two. three four"),)
     r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=2)
     sent = w.local_sent[0][1]
-    assert r["speakers"] == 2 and "Speaker 1\none two" in sent and "Speaker 2\nthree four" in sent
+    assert r["speakers"] == 2 and "Speaker 1\none two." in sent and "Speaker 2\nthree four" in sent
 
 
 def test_no_timings_does_not_hide_a_failed_send(plugin, memo):
