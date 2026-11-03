@@ -135,17 +135,60 @@ def test_same_words_is_exact(sp):
 
 def test_split_gives_each_speaker_their_own_words(sp):
     C, T = sp.Cue, sp.Turn
-    cue = C(0, 10, "one two three four five six seven eight nine ten")
+    cue = C(0, 10, "one two three four five. six seven eight nine ten")
     got = sp.split_at_turns([cue], [T(0, 5, 0), T(5, 10, 1)])
-    assert [c.text for c in got] == ["one two three four five", "six seven eight nine ten"]
+    assert [c.text for c in got] == ["one two three four five.", "six seven eight nine ten"]
+
+
+def test_a_sentence_is_not_cut_for_a_voice_change_inside_it(sp):
+    C, T = sp.Cue, sp.Turn
+    cue = C(0, 10, "and it would be good for all of our people here")
+    got = sp.split_at_turns([cue], [T(0, 5, 0), T(5, 10, 1)])
+    assert [c.text for c in got] == [cue.text]
+
+
+def test_a_split_moves_to_the_nearest_sentence_end(sp):
+    C, T = sp.Cue, sp.Turn
+    cue = C(0, 12, "a b c d. e f g h i j k l")
+    got = sp.split_at_turns([cue], [T(0, 6, 0), T(6, 12, 1)])
+    assert [c.text for c in got] == ["a b c d.", "e f g h i j k l"]
+
+
+def test_a_very_long_cue_with_no_sentence_end_can_still_split(sp):
+    C, T = sp.Cue, sp.Turn
+    words = [f"w{i}" for i in range(sp.LONG_CUE_WORDS)]
+    got = sp.split_at_turns([C(0, 30, " ".join(words))], [T(0, 15, 0), T(15, 30, 1)])
+    assert len(got) == 2 and " ".join(c.text for c in got) == " ".join(words)
+
+
+def test_a_snap_cannot_jump_over_the_next_voice_change(sp):
+    C, T = sp.Cue, sp.Turn
+    words = [f"w{i}" for i in range(40)]
+    words[17] += "."
+    got = sp.split_at_turns([C(0, 40, " ".join(words))], [T(0, 11, 0), T(11, 14, 1), T(14, 40, 2)])
+    assert [len(c.text.split()) for c in got] == [11, 7, 22] and got[1].text.endswith("w17.")
+
+
+def test_a_brief_voice_change_goes_to_its_neighbour(sp):
+    T = sp.Turn
+    assert sp.steady([T(0, 10, 0), T(10, 11, 1), T(11, 20, 0)]) == (T(0, 20, 0),)
+
+
+def test_flapping_settles_into_turns(sp):
+    C, T = sp.Cue, sp.Turn
+    flap = [T(i, i + 1, i % 2) for i in range(6)] + [T(6, 12, 1)]
+    d = sp.Diarized(tuple(flap))
+    got = sp.split_at_turns([C(0, 12, "a b c d e f g h")], d.turns)
+    assert sp.render(got, d).count("Speaker") == 2  # the note's mention plus one label
+    assert " ".join(c.text for c in got) == "a b c d e f g h"
 
 
 def test_split_follows_the_hints_over_a_steady_pace(sp):
     C, T = sp.Cue, sp.Turn
-    cue = C(0, 10, "a b c d e f g h i j")
-    hints = [C(0, 7, "a b c d e f g h"), C(7, 10, "i j")]
-    got = sp.split_at_turns([cue], [T(0, 7, 0), T(7, 10, 1)], hints)
-    assert [c.text for c in got] == ["a b c d e f g h", "i j"]
+    cue = C(0, 10, "a b c. d e f g h. i j")
+    hints = [C(0, 5, "a b c. d e f g h."), C(5, 10, "i j")]
+    got = sp.split_at_turns([cue], [T(0, 5, 0), T(5, 10, 1)], hints)
+    assert [c.text for c in got] == ["a b c. d e f g h.", "i j"]
 
 
 def test_split_ignores_a_tiny_overlap(sp):
@@ -156,7 +199,7 @@ def test_split_ignores_a_tiny_overlap(sp):
 
 def test_a_lopsided_hint_cannot_erase_a_speaker(sp):
     C, T = sp.Cue, sp.Turn
-    cue = C(0, 10, "a b c d e f g h i j")
+    cue = C(0, 10, "a b c d e. f g h i j")
     for hints in ([C(0, 10, "a b c d e f g h i j")], [C(0, 2, "a"), C(2, 4, "b")]):
         got = sp.split_at_turns([cue], [T(0, 5, 0), T(5, 10, 1)], hints)
         assert len(got) == 2 and all(q.text for q in got)
@@ -165,7 +208,7 @@ def test_a_lopsided_hint_cannot_erase_a_speaker(sp):
 def test_a_short_turn_in_a_sparse_cue_keeps_a_word(sp):
     C, T = sp.Cue, sp.Turn
     got = sp.split_at_turns([C(0, 20, "a b c d e")], [T(0, 1, 0), T(1, 20, 1)])
-    assert [q.text for q in got] == ["a", "b c d e"]
+    assert [q.text for q in got] == ["a b c d e"]
 
 
 def test_more_people_than_words_keeps_every_word_once(sp):
@@ -178,7 +221,7 @@ def test_an_interruption_inside_a_long_turn_is_heard(sp):
     C, T = sp.Cue, sp.Turn
     d = sp.Diarized((T(0, 10, 0), T(2, 8, 1)))
     assert sp.flatten(d.turns) == (T(0, 2, 0), T(2, 8, 1), T(8, 10, 0))
-    got = sp.split_at_turns([C(0, 10, "a b c d e f g h i j")], d.turns)
+    got = sp.split_at_turns([C(0, 10, "a b. c d e f g h. i j")], d.turns)
     text = sp.render(got, d)
     assert sp.speaker_count(got, d) == 2 and text.count("Speaker 1\n") == 2 and text.count("Speaker 2\n") == 1
 
@@ -215,8 +258,8 @@ def test_splitting_never_loses_or_reorders_a_word(sp, seed):
 
 def test_a_person_named_like_a_number_is_not_doubled(sp):
     C, T = sp.Cue, sp.Turn
-    d = sp.Diarized((T(0, 1, 0), T(1, 2, 1), T(2, 3, 2)), {1: "Speaker 2"})
-    text = sp.render([C(0, 1, "a"), C(1, 2, "b"), C(2, 3, "c")], d)
+    d = sp.Diarized((T(0, 2, 0), T(2, 4, 1), T(4, 6, 2)), {1: "Speaker 2"})
+    text = sp.render([C(0, 2, "a"), C(2, 4, "b"), C(4, 6, "c")], d)
     assert text.count("Speaker 2\n") == 1 and "Speaker 1\n" in text and "Speaker 3\n" in text
 
 

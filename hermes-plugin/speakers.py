@@ -34,6 +34,14 @@ HARD_PARAGRAPH_CHARS = 700
 NEAREST_TURN_S = 1.5
 MIN_PIECE_S = 0.7
 HINT_NEAR_S = 1.0
+# Shorter than this isn't a turn anyone would recognise: on real talk these are
+# mostly overlaps and misheard voices, and each one cut a sentence in half.
+MIN_TURN_S = 2.0
+# A split moves to a sentence end this many words away at most, and without one
+# the sentence stays whole, unless the cue is so long that one label would mislead.
+SNAP_WORDS = 8
+LONG_CUE_WORDS = 30
+_SENTENCE_END = (".", "!", "?", ".\"", "?\"", "!\"", ".”", "?”", "!”")
 # The only containers ffmpeg may open for us. A playlist (HLS, concat) would make
 # it read other files on this machine on behalf of whoever wrote the playlist.
 AUDIO_DEMUXERS = (
@@ -153,6 +161,31 @@ def flatten(turns: Sequence[Turn]) -> tuple[Turn, ...]:
     return tuple(out)
 
 
+def steady(turns: Sequence[Turn]) -> tuple[Turn, ...]:
+    """The flattened timeline without its flicker: anything under MIN_TURN_S goes to
+    the longer of its neighbours. Labels get coarser and sentences stay in one piece."""
+    out = list(flatten(turns))
+    while True:
+        joined: list[Turn] = []
+        for t in out:
+            if joined and joined[-1].speaker == t.speaker:
+                joined[-1] = Turn(joined[-1].start, t.end, t.speaker)
+            else:
+                joined.append(t)
+        out = joined
+        short = [i for i, t in enumerate(out) if t.end - t.start < MIN_TURN_S]
+        if not short or len(out) == 1:
+            return tuple(out)
+        i = min(short, key=lambda n: out[n].end - out[n].start)
+        gone = out.pop(i)
+        before = out[i - 1] if i > 0 else None
+        after = out[i] if i < len(out) else None
+        if after is None or (before is not None and before.end - before.start >= after.end - after.start):
+            out[i - 1] = Turn(before.start, gone.end, before.speaker)  # type: ignore[union-attr]
+        else:
+            out[i] = Turn(gone.start, after.end, after.speaker)
+
+
 def _pieces(cue: Cue, turns: Sequence[Turn]) -> list[Turn]:
     """The speakers inside one cue, in order, ignoring anything too short to place."""
     merged: list[Turn] = []
@@ -180,30 +213,42 @@ def _share_before(cue: Cue, at: float, hints: Sequence[Cue]) -> float:
     return (at - cue.start) / span if span > 0 else 0.0
 
 
+def _stop_for(words: Sequence[str], wanted: int, edge: int, limit: int) -> int | None:
+    """Where to end the words before a voice change: the nearest sentence end before
+    the next change, or None to leave the sentence whole."""
+    ends = [
+        k for k in range(edge + 1, min(limit, len(words) - 1) + 1)
+        if abs(k - wanted) <= SNAP_WORDS and words[k - 1].endswith(_SENTENCE_END)
+    ]
+    if ends:
+        return min(ends, key=lambda k: abs(k - wanted))
+    if len(words) >= LONG_CUE_WORDS and edge + 1 < len(words):
+        return max(edge + 1, min(wanted, len(words) - 1))
+    return None
+
+
 def split_at_turns(cues: Sequence[Cue], turns: Sequence[Turn], hints: Sequence[Cue] = ()) -> tuple[Cue, ...]:
-    """Split any cue that holds two speakers, so each gets their own words. Every
-    word survives, in order, and everyone placed in a cue gets at least one word,
-    as far as the words go. Where exactly a split falls is an estimate."""
-    flat = flatten(turns)
+    """Give each speaker their own words where a voice change falls near a sentence
+    end. Every word survives, in order. A cue left whole goes to whoever spoke most
+    of it. Where exactly a split falls is an estimate."""
+    flat = steady(turns)
     out: list[Cue] = []
     for cue in cues:
         pieces = _pieces(cue, flat)
         words = cue.text.split()
-        if len(pieces) > len(words):
-            longest = sorted(pieces, key=lambda p: p.end - p.start, reverse=True)[: len(words)]
-            pieces = [p for p in pieces if p in longest]
-        if len(pieces) < 2:
+        edge, start = 0, pieces[0].start if pieces else cue.start
+        parts: list[Cue] = []
+        wants = [round(_share_before(cue, piece.start, hints) * len(words)) for piece in pieces[1:]]
+        for index, (previous, piece) in enumerate(zip(pieces, pieces[1:])):
+            limit = wants[index + 1] if index + 1 < len(wants) else len(words) - 1
+            stop = _stop_for(words, wants[index], edge, limit)
+            if stop is not None:
+                parts.append(Cue(start, previous.end, " ".join(words[edge:stop])))
+                edge, start = stop, piece.start
+        if parts:
+            out.extend([*parts, Cue(start, pieces[-1].end, " ".join(words[edge:]))])
+        else:
             out.append(cue)
-            continue
-        edge = 0
-        for index, piece in enumerate(pieces):
-            if index == len(pieces) - 1:
-                stop = len(words)
-            else:
-                wanted = round(_share_before(cue, pieces[index + 1].start, hints) * len(words))
-                stop = max(edge + 1, min(wanted, len(words) - (len(pieces) - index - 1)))
-            out.append(Cue(piece.start, piece.end, " ".join(words[edge:stop])))
-            edge = stop
     return tuple(out)
 
 
@@ -238,7 +283,7 @@ def _next_label(labels: Mapping[int, str], names: Mapping[int, str]) -> str:
 
 def render(cues: Sequence[Cue], diarized: Diarized | None = None) -> str:
     """Cues as readable text: paragraphs, and speakers when they are known."""
-    turns = flatten(diarized.turns) if diarized else ()
+    turns = steady(diarized.turns) if diarized else ()
     names = diarized.names if diarized else {}
     labels: dict[int, str] = {}
     current: int | None = None
@@ -287,7 +332,7 @@ def render(cues: Sequence[Cue], diarized: Diarized | None = None) -> str:
 
 def heard(cues: Sequence[Cue], diarized: Diarized) -> set[int]:
     """The speakers who end up with words in this transcript."""
-    flat = flatten(diarized.turns)
+    flat = steady(diarized.turns)
     return {s for s in (_speaker_for(c, flat) for c in cues) if s is not None}
 
 

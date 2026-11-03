@@ -535,6 +535,14 @@ def test_more_voices_than_they_said_spends_nothing(plugin, memo):
     assert r["sent"] is False and w.papareo.calls == 0
 
 
+def test_a_recognised_voice_too_brief_to_label_is_not_called_unmatched(plugin, memo):
+    sp = plugin.speakers
+    d = sp.Diarized((sp.Turn(0, 3, 0), sp.Turn(3, 4, 1), sp.Turn(4, 8, 0)), {0: "Aroha", 1: "Tama"})
+    w, deps = _timed_world(plugin, lambda *a: d)
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
+    assert r["samples_matched_too_briefly"] == ["Tama"] and "samples_not_matched" not in r
+
+
 def test_samples_are_still_cleared_when_the_count_is_impossible(plugin, memo):
     sp = plugin.speakers
     used = []
@@ -646,10 +654,10 @@ def test_paid_but_lost_tells_the_agent_it_was_charged(plugin, memo):
 def test_a_shared_cue_is_split_between_speakers_in_the_file(plugin, memo):
     sp = plugin.speakers
     w, deps = _timed_world(plugin, lambda *a: sp.Diarized((sp.Turn(0, 2, 0), sp.Turn(2, 4, 1))))
-    w.papareo.cues = (sp.Cue(0, 4, "one two three four"),)
+    w.papareo.cues = (sp.Cue(0, 4, "one two. three four"),)
     r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=2)
     sent = w.local_sent[0][1]
-    assert r["speakers"] == 2 and "Speaker 1\none two" in sent and "Speaker 2\nthree four" in sent
+    assert r["speakers"] == 2 and "Speaker 1\none two." in sent and "Speaker 2\nthree four" in sent
 
 
 def test_no_timings_does_not_hide_a_failed_send(plugin, memo):
@@ -684,12 +692,12 @@ def test_a_layout_crash_still_delivers_the_paid_words(plugin, memo, monkeypatch)
     assert "Tēnā koutou" in w.local_sent[0][1]
 
 
-def test_a_name_that_got_no_words_is_reported_as_not_found(plugin, memo):
+def test_a_name_that_got_no_words_is_reported_as_too_brief(plugin, memo):
     sp = plugin.speakers
     d = sp.Diarized((sp.Turn(0, 4, 0), sp.Turn(90, 95, 1)), {0: "Aroha", 1: "Tama"})
     w, deps = _timed_world(plugin, lambda *a: d)
     r = plugin.transcribe.run(str(memo), "papareo", deps, speakers=True)
-    assert r["named_speakers"] == ["Aroha"] and r["samples_not_matched"] == ["Tama"]
+    assert r["named_speakers"] == ["Aroha"] and r["samples_matched_too_briefly"] == ["Tama"]
 
 
 @pytest.mark.parametrize("clips_used,expected", [(True, [1]), (False, [])])

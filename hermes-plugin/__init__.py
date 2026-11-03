@@ -38,7 +38,7 @@ from .speakers import Diarizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 KEY_ENV = "PAPAREO_API_KEY"
 SOCKET_ENV = "OVENMITT_SOCKET"
