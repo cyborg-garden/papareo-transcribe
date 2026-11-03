@@ -26,6 +26,7 @@ import json  # noqa: E402
 import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
+import subprocess  # noqa: E402
 import sys  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -33,12 +34,13 @@ from typing import Any  # noqa: E402
 
 from . import deliver, fetch, transcribe  # noqa: E402
 from .local import LocalWhisper, has_audio, probe_duration  # noqa: E402
+from . import longjob  # noqa: E402
 from .papareo import PapareoClient  # noqa: E402
 from .speakers import Diarizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 KEY_ENV = "PAPAREO_API_KEY"
 SOCKET_ENV = "OVENMITT_SOCKET"
@@ -62,7 +64,8 @@ SCHEMA: dict[str, Any] = {
         "to read it. Give path for a file they sent, or url for a share link to one file (direct, "
         "OneDrive, Google Drive, Dropbox). speakers=true labels who spoke when, on this machine. "
         "voice_samples names speakers from short clips of each person; only use it when each person "
-        "has agreed, and nothing about their voice is kept."
+        "has agreed, and nothing about their voice is kept. Papa Reo recordings over an hour run in the "
+        "background in parts: the first call explains what to confirm with the person."
     ),
     "parameters": {
         "type": "object",
@@ -76,6 +79,8 @@ SCHEMA: dict[str, Any] = {
                 "description": "Person's name -> path of a short clip of them, if the person sent clips.",
                 "additionalProperties": {"type": "string"},
             },
+            "long_job_ok": {"type": "boolean", "description": "True only once the person has agreed to a long job."},
+            "resume_job": {"type": "boolean", "description": "True to carry on this chat's stopped long job. Nothing else is needed."},
             "engine": {"type": "string", "enum": ["local", "papareo"]},
             "chosen_by_person": {
                 "type": "boolean",
@@ -231,7 +236,51 @@ def register(ctx: Any) -> None:
         diarize=Diarizer(),
     )
 
+    def launch(job: longjob.Job, samples: dict[str, str], platform: str, chat_id: str, attach: Any, say: Any) -> dict:
+        env = longjob.Env(
+            papareo=papareo, diarize=deps.diarize, attach=attach, say=say, samples=samples,
+            samples_used=lambda: _forget_samples(samples),
+        )
+        caption = transcribe.long_caption()
+        if not longjob.start(lambda: longjob.run_job(job, env, transcribe.lay_out, caption)):
+            return {"sent": False, "error": longjob.BUSY}
+        return {"sent": False, "started": True, "parts": len(job.parts), "next": longjob.NEXT_STARTED}
+
+    def resume() -> dict:
+        try:
+            platform, chat_id, attach, say = deliver.bind()
+        except Exception:  # noqa: BLE001
+            return {"sent": False, "error": "this conversation has no chat to send to"}
+        if longjob.is_busy():
+            return {"sent": False, "error": longjob.BUSY}
+        job = longjob.latest_for(platform, chat_id)
+        if job is None:
+            return {"sent": False, "error": "there is no stopped long job for this chat"}
+        return launch(job, {}, platform, chat_id, attach, say)
+
+    def begin_long(
+        path: str, duration: float, speakers: bool, count: int | None, samples: dict[str, str], agreed: bool, ours: bool
+    ) -> dict:
+        problem = longjob.refusal(path, duration, speakers, count, deps.diarize, transcribe.direct_ok(deps))
+        if problem:
+            return {"sent": False, "error": problem}
+        if longjob.is_busy():
+            return {"sent": False, "error": longjob.BUSY}
+        if not agreed:
+            return longjob.confirmation(duration)
+        try:
+            platform, chat_id, attach, say = deliver.bind()
+        except Exception:  # noqa: BLE001
+            return {"sent": False, "error": "this conversation has no chat to send to"}
+        job = longjob.new_job(
+            path, duration, platform, chat_id, deliver.filename_for(path, deps.now()), speakers, count,
+            shutil.move if ours else shutil.copyfile, subprocess.run,
+        )
+        return launch(job, samples, platform, chat_id, attach, say)
+
     def handle(args: dict[str, Any], **_: Any) -> str:
+        if args.get("resume_job") is True or str(args.get("resume_job")).lower() == "true":
+            return json.dumps(resume(), ensure_ascii=False)
         path = str(args.get("path") or "")
         engine = str(args.get("engine") or "auto")  # missing: refused with ASK_FIRST
         chosen = args.get("chosen_by_person") is True or str(args.get("chosen_by_person")).lower() == "true"
@@ -262,6 +311,15 @@ def register(ctx: Any) -> None:
                     audio = False
                 if not audio:
                     return json.dumps({"sent": False, "error": fetch.NEEDS_LINK}, ensure_ascii=False)
+
+            if engine == "papareo" and path and Path(path).is_file():
+                seconds = probe_duration(path)
+                if seconds is not None and seconds > longjob.LONG_AFTER_S:
+                    agreed = args.get("long_job_ok") is True or str(args.get("long_job_ok")).lower() == "true"
+                    return json.dumps(
+                        begin_long(path, seconds, wanted or bool(samples) or bool(count), count, samples, agreed, bool(tmp)),
+                        ensure_ascii=False,
+                    )
 
             def mark_used() -> None:
                 nonlocal used

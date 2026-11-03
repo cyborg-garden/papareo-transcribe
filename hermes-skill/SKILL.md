@@ -47,6 +47,12 @@ If they want to know who said what, ask how many people are in the recording unl
 
 To put names on the labels, they can send a short clip of each person. Pass those as `voice_samples`, with each person's name and the clip's path. Only do this when each person has agreed to it: ask if you aren't sure. The result's `samples_not_matched` lists anyone who wasn't recognised, and `samples_matched_too_briefly` anyone recognised who spoke too little to get a label: don't ask them for another clip. No voiceprint is kept, the clips are deleted once they've been used, and there is no way to keep a voice yet, so don't offer to remember one.
 
+## Long recordings
+
+A Papa Reo recording over an hour runs in the background, in parts, up to 48 hours or 4GB. Links are the way to send these, because Signal stops at 100MB. Call as usual. The first answer has `needs_agreement`: tell them what it says and only call again with `long_job_ok: true` once they agree. If they want speakers it needs `num_speakers`, so ask. After that the file arrives by itself, however long it takes, and you don't need to do anything. Speaker numbers across parts are matched by machine and can slip.
+
+If a job stops, it says so in the chat. When they ask to carry on, call with only `engine`, `chosen_by_person` and `resume_job: true`. Parts already done aren't paid for again. If they ask about one that seems to have vanished, because the agent restarted, try the same thing.
+
 ## The Kaitiakitanga License
 
 Papa Reo transcripts come under the [Kaitiakitanga License](https://papareo.io/kaitiakitanga), and you must follow it: the transcript doesn't pass through you, and you never pass it to another tool or service.

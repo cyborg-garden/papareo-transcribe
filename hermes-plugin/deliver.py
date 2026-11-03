@@ -10,6 +10,7 @@ the model.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -18,6 +19,8 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SEND_TIMEOUT_S = 180.0
 # Gateway cache names: voice notes are audio_<hex>.<ext> (no user filename);
@@ -65,7 +68,8 @@ def session_platform() -> str | None:
     return get_session_env("HERMES_SESSION_PLATFORM", "") or None
 
 
-def _sender() -> tuple[Any, Any]:
+def _binding() -> tuple[Any, str, Any, Any]:
+    """This turn's adapter, chat, thread and gateway loop."""
     from gateway.config import Platform  # type: ignore[import-not-found]
     from gateway.run import _gateway_runner_ref  # type: ignore[import-not-found]
     from gateway.session_context import get_session_env  # type: ignore[import-not-found]
@@ -85,11 +89,16 @@ def _sender() -> tuple[Any, Any]:
         raise NoChat(f"no live {platform_name} adapter")
     thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "")
     metadata = {"thread_id": thread_id} if thread_id else None
+    return adapter, chat_id, metadata, getattr(runner, "_gateway_loop", None)
+
+
+def _sender() -> tuple[Any, Any]:
+    adapter, chat_id, metadata, loop = _binding()
 
     async def send(file_path: str, caption: str | None) -> Any:
         return await adapter.send_document(chat_id, file_path, caption=caption, metadata=metadata)
 
-    return send, getattr(runner, "_gateway_loop", None)
+    return send, loop
 
 
 def _run(coro: Any, loop: Any) -> Any:
@@ -101,6 +110,31 @@ def _run(coro: Any, loop: Any) -> Any:
 def send_local(filename: str, text: str, caption: str | None) -> None:
     """Send an unprotected transcript to this chat as a .txt attachment."""
     send, loop = _sender()
+    _send_file(send, loop, filename, text, caption)
+
+
+def bind() -> tuple[str, str, Any, Any]:
+    """This chat, held for a background job that outlives the turn: its platform, its
+    id, a way to attach a file, and a way to say something."""
+    adapter, chat_id, metadata, loop = _binding()
+    platform = session_platform() or ""
+
+    async def send(file_path: str, caption: str | None) -> Any:
+        return await adapter.send_document(chat_id, file_path, caption=caption, metadata=metadata)
+
+    def attach(filename: str, text: str, caption: str | None) -> None:
+        _send_file(send, loop, filename, text, caption)
+
+    def say(message: str) -> None:
+        try:
+            _run(adapter.send(chat_id, message, metadata=metadata), loop)
+        except Exception as e:  # noqa: BLE001 - nothing more can be done, and the job must still end
+            logger.warning("papareo_transcribe: couldn't send a job message: %s", type(e).__name__)
+
+    return platform, chat_id, attach, say
+
+
+def _send_file(send: Any, loop: Any, filename: str, text: str, caption: str | None) -> None:
     tmpdir = tempfile.mkdtemp(prefix="transcript-")  # mode 0700
     try:
         path = os.path.join(tmpdir, filename)

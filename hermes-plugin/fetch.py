@@ -31,8 +31,9 @@ import httpx
 # httpx logs every URL at INFO, and share links carry access tokens.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-MAX_BYTES = 100 * 1024 * 1024
-MAX_SECONDS = 20 * 60.0
+# Big enough for a long job. A turn gets 30 minutes, so the download gets less.
+MAX_BYTES = 4 * 1024 * 1024 * 1024
+MAX_SECONDS = 25 * 60.0
 MAX_REDIRECTS = 8
 TIMEOUT_S = 120.0
 TOO_LONG = "that link took too long to download"

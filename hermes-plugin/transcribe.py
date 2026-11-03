@@ -118,6 +118,10 @@ def check_path(path: str, is_audio: Callable[[str], bool] | None = None) -> str 
     return None
 
 
+def long_caption() -> str:
+    return _caption(PAPAREO_SOURCE)
+
+
 def preflight(deps: Deps) -> str | None:
     """Why escalation can't safely happen right now, or None if it can."""
     if not deps.papareo.configured:
@@ -188,7 +192,7 @@ def _separate(
     return diarized, None
 
 
-def _lay_out(cues: Any, text: str, diarized: Diarized | None, hints: Any = ()) -> tuple[str, Any, bool]:
+def lay_out(cues: Any, text: str, diarized: Diarized | None, hints: Any = ()) -> tuple[str, Any, bool]:
     """The transcript as it will be delivered. Layout must never cost the words:
     if it fails for any reason, the plain text goes out. Never logs the text."""
     if not cues:
@@ -280,7 +284,7 @@ def run(
             if speakers else (None, None)
         )
         note = f"Speakers weren't separated: {problem}." if problem else None
-        text, cues, _ = _lay_out(local.cues, local.text, diarized)
+        text, cues, _ = lay_out(local.cues, local.text, diarized)
         local = replace(local, text=text)
         return {**_deliver_local(local, filename, note, deps), **_speaker_fields(cues, diarized)}
 
@@ -304,7 +308,7 @@ def run(
         reasons = ("asked",)
 
     why_not = preflight(deps)
-    direct = bool(why_not) and _direct_ok(deps)
+    direct = bool(why_not) and direct_ok(deps)
     if direct:
         why_not = None
     if why_not:
@@ -339,7 +343,7 @@ def run(
             local, filename, "Papa Reo didn't complete (an unexpected error). Ask again to retry Papa Reo.", deps
         )
 
-    text, cues, no_labels = _lay_out(timed.cues, timed.text, diarized, timed.hints)
+    text, cues, no_labels = lay_out(timed.cues, timed.text, diarized, timed.hints)
     extra = _speaker_fields(cues, diarized)
     del timed, cues
     body = with_footer(text)
@@ -424,7 +428,7 @@ NEXT_PAPAREO_DIRECT = (
 )
 
 
-def _direct_ok(deps: Deps) -> bool:
+def direct_ok(deps: Deps) -> bool:
     """No vault, but the operator allows attaching Papa Reo files directly on
     this chat's platform, and the key is there."""
     if not deps.direct_platforms or not deps.papareo.configured:
