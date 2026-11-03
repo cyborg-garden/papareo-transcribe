@@ -539,10 +539,17 @@ def test_samples_are_still_cleared_when_the_count_is_impossible(plugin, memo):
     sp = plugin.speakers
     used = []
     w, deps = _timed_world(plugin, lambda *a: _voices(sp, 50))
-    plugin.transcribe.run(
+    r = plugin.transcribe.run(
         str(memo), "papareo", deps, voice_samples={"Aroha": str(memo)}, samples_used=lambda: used.append(1)
     )
-    assert used == [1] and w.papareo.calls == 0
+    assert used == [1] and w.papareo.calls == 0 and "sending again" in r["note"]
+
+
+def test_a_count_that_was_ignored_does_not_ask_for_the_count_again(plugin, memo):
+    sp = plugin.speakers
+    w, deps = _timed_world(plugin, lambda *a: _voices(sp, 50))
+    r = plugin.transcribe.run(str(memo), "papareo", deps, num_speakers=3)
+    assert "how many people" not in r["note"] and "without speaker labels" in r["note"]
 
 
 def test_local_transcript_keeps_going_without_impossible_labels(plugin, memo):
@@ -552,6 +559,7 @@ def test_local_transcript_keeps_going_without_impossible_labels(plugin, memo):
     deps.diarize = lambda *a: _voices(sp, 50)
     r = plugin.transcribe.run(str(memo), "local", deps, speakers=True)
     assert r["sent"] is True and "50 voices" in r["note"] and "Speaker 1" not in r.get("text", "")
+    assert "num_speakers" not in r["note"]
 
 
 def test_not_installed_spends_nothing(plugin, memo):
