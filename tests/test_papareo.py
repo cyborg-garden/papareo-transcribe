@@ -285,3 +285,55 @@ def test_words_in_the_json_survive_an_empty_text_download(plugin):
     client = pa.PapareoClient("k", transport=httpx.MockTransport(handler), sleep=lambda s: None)
     assert client.finish_task("t").text == "kia ora"
 
+
+
+needs_ffmpeg = pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="ffmpeg not installed")
+
+
+def _flac(tmp_path):
+    import subprocess
+    import wave
+    src = tmp_path / "tone.wav"
+    with wave.open(str(src), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\x00\x01" * 16000)
+    out = tmp_path / "tone.flac"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-c:a", "flac", str(out)], check=True)
+    return out
+
+
+@needs_ffmpeg
+def test_flac_is_sent_as_wav(plugin, tmp_path):
+    # Papa Reo's large endpoint accepts a FLAC upload and then fails the task.
+    seen = {}
+
+    def handler(request: httpx.Request):
+        if request.method == "POST":
+            seen["body"] = request.read()
+            return httpx.Response(200, json={"task_id": "t1"})
+        return httpx.Response(200, json={"status": "PENDING"})
+
+    flac = _flac(tmp_path)
+    task = client(plugin, handler).start_task(str(flac))
+    assert task == "t1"
+    assert b'filename="tone.wav"' in seen["body"] and b"RIFF" in seen["body"]
+    assert flac.exists()  # the original is untouched; the WAV copy is gone
+
+
+@needs_ffmpeg
+def test_the_temporary_wav_is_removed(plugin, tmp_path):
+    import glob
+    import tempfile
+    before = set(glob.glob(tempfile.gettempdir() + "/papareo-send-*"))
+    with plugin.papareo.sendable(_flac(tmp_path)) as wav:
+        assert wav.suffix == ".wav" and wav.is_file()
+    assert set(glob.glob(tempfile.gettempdir() + "/papareo-send-*")) == before
+
+
+def test_other_formats_are_sent_as_they_are(plugin, tmp_path):
+    p = tmp_path / "memo.m4a"
+    p.write_bytes(b"x")
+    with plugin.papareo.sendable(p) as q:
+        assert q == p

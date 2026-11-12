@@ -102,6 +102,24 @@ def two_voices(plugin):
     return diarize
 
 
+def alike_voices(plugin):
+    """Two people in one room whose voices sound alike to the embedding model."""
+    sp = plugin.speakers
+
+    def diarize(path, count, samples, seconds, want_voices):
+        return sp.Diarized(
+            (sp.Turn(0, 3, 0), sp.Turn(3, 6, 1)), voices={0: (1.0, 0.0), 1: (0.95, 0.3)}
+        )
+
+    return diarize
+
+
+def test_alike_voices_still_get_their_own_labels_when_the_count_is_known(plugin, lj, tmp_path):
+    job, env, *_ = world(plugin, lj, tmp_path, diarize=alike_voices(plugin))
+    run(plugin, lj, job, env)
+    assert {person for _, _, person in job.turns} == {0, 1}
+
+
 def test_parts_cover_everything_with_no_gaps(lj):
     parts = lj.plan_parts(15 * 3600.0, ())
     assert parts[0][0] == 0 and parts[-1][1] == 15 * 3600.0
@@ -150,6 +168,51 @@ def test_never_more_people_than_they_said(lj):
     linker.person((1.0, 0.0))
     linker.person((0.0, 1.0))
     assert linker.person((0.7, -0.7)) in (0, 1)
+
+
+def test_parts_are_sent_to_papa_reo_as_wav(plugin, lj, tmp_path):
+    # Papa Reo's large endpoint fails every FLAC task (2026-11-12); WAV works.
+    import wave
+    job, env, sent, said, _ = world(plugin, lj, tmp_path, speakers=False)
+    run(plugin, lj, job, env)
+    assert env.papareo.started and all(p.endswith(".wav") for p in env.papareo.started)
+    assert len(sent) == 1
+
+
+def test_a_cut_part_is_a_real_wav(lj, plugin, tmp_path):
+    import wave
+    job, env, *_ = world(plugin, lj, tmp_path, speakers=False)
+    part = lj._cut(job, 0, env.run)
+    with wave.open(str(part), "rb") as w:
+        assert w.getnframes() > 0
+
+
+def test_known_count_keeps_every_voice_in_a_part_apart(lj):
+    # Six people in one room: their voices are alike enough to pass the link
+    # threshold, but the separation was told six, so six labels come out.
+    linker = lj.VoiceLinker(6)
+    alike = {i: (1.0, 0.1 * i, 0.05 * i) for i in range(6)}
+    people = linker.assign(alike)
+    assert sorted(people.values()) == [0, 1, 2, 3, 4, 5]
+
+
+def test_known_count_matches_parts_one_to_one(lj):
+    linker = lj.VoiceLinker(2)
+    first = linker.assign({0: (1.0, 0.0), 1: (0.0, 1.0)})
+    second = linker.assign({7: (0.05, 1.0), 8: (1.0, 0.1)})
+    assert second[7] == first[1] and second[8] == first[0]
+
+
+def test_known_count_never_puts_two_voices_of_a_part_on_one_person(lj):
+    linker = lj.VoiceLinker(2)
+    linker.assign({0: (1.0, 0.0), 1: (0.0, 1.0)})
+    both_like_zero = linker.assign({0: (1.0, 0.0), 1: (0.98, 0.2)})
+    assert len(set(both_like_zero.values())) == 2
+
+
+def test_unknown_count_may_still_merge_a_split_person(lj):
+    linker = lj.VoiceLinker(None)
+    assert set(linker.assign({0: (1.0, 0.0), 1: (0.9, 0.1)}).values()) == {0}
 
 
 def test_a_new_person_is_kept_when_no_limit(lj):

@@ -184,6 +184,49 @@ class VoiceLinker:
         self._people[best] = ([x + y for x, y in zip(total, vector)], count + 1)
         return best
 
+    def assign(self, voices: Mapping[int, Sequence[float]]) -> dict[int, int]:
+        """Which person each of one part's voices is.
+
+        With a known number of people the separation is told that number, so
+        every voice in a part is a different person: they are matched to people
+        one-to-one, best match first. Voices in one room can sound alike enough
+        to pass LINK_THRESHOLD, and without this they all collapsed into one
+        person. Without a known number the separation may split one person in
+        two, so each voice is linked on its own and may merge.
+        """
+        if self._limit is None:
+            return {local: self.person(vector) for local, vector in voices.items()}
+        pairs = sorted(
+            ((self._cosine(vector, total), local, person)
+             for local, vector in voices.items()
+             for person, (total, _) in enumerate(self._people)),
+            reverse=True,
+        )
+        full = len(self._people) >= self._limit
+        out: dict[int, int] = {}
+        used: set[int] = set()
+        for score, local, person in pairs:
+            if local in out or person in used:
+                continue
+            if score >= LINK_THRESHOLD or full:
+                out[local] = person
+                used.add(person)
+        for local in voices:
+            if local in out:
+                continue
+            if len(self._people) < self._limit:
+                self._people.append(([0.0] * len(voices[local]), 0))
+                out[local] = len(self._people) - 1
+            else:
+                free = [p for p in range(len(self._people)) if p not in used]
+                pool = free or list(range(len(self._people)))
+                out[local] = max(pool, key=lambda p: self._cosine(voices[local], self._people[p][0]))
+            used.add(out[local])
+        for local, person in out.items():
+            total, count = self._people[person]
+            self._people[person] = ([x + y for x, y in zip(total, voices[local])], count + 1)
+        return out
+
 
 def _env() -> dict[str, str]:
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(jobs_home())}
@@ -253,14 +296,17 @@ def _all_jobs() -> list[Job]:
 
 
 def _cut(job: Job, index: int, run: Callable[..., subprocess.CompletedProcess]) -> Path:
-    """One part as FLAC. The samples are copied out of the WAV by position, so parts
-    neither lose nor repeat any, with no seeking inside ffmpeg."""
+    """One part as WAV. The samples are copied out of the WAV by position, so parts
+    neither lose nor repeat any, with no seeking inside ffmpeg.
+
+    WAV, not FLAC: Papa Reo's /tuhi/transcribe/large accepts the upload of a
+    FLAC file and then reports the task as failed, at any length (checked
+    2026-11-12 with 1-, 10- and 20-minute slices). WAV and AAC succeed."""
     start, end = job.parts[index]
-    dest = _folder(job) / f"part-{index}.flac"
+    dest = _folder(job) / f"part-{index}.wav"
     if dest.is_file():
         return dest
     piece = dest.with_suffix(".tmp.wav")
-    temporary = dest.with_suffix(".tmp.flac")
     last = index == len(job.parts) - 1
     try:
         with wave.open(str(_folder(job) / job.source), "rb") as source:
@@ -278,18 +324,10 @@ def _cut(job: Job, index: int, run: Callable[..., subprocess.CompletedProcess]) 
                         break
                     out.writeframes(block)
                     left -= len(block) // (source.getsampwidth() * source.getnchannels())
-        done = run(
-            ["ffmpeg", "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file", "-f", "wav", "-i", str(piece),
-             "-c:a", "flac", str(temporary)],
-            capture_output=True, timeout=TOOL_TIMEOUT_S, env=_env(),
-        )
-        if done.returncode != 0:
-            raise OSError("ffmpeg failed")
-    except (OSError, EOFError, wave.Error, subprocess.TimeoutExpired) as e:
-        raise Stopped(f"I couldn't cut part {index + 1} of the recording. {RESUME_HINT}") from e
-    finally:
+        piece.replace(dest)
+    except (OSError, EOFError, wave.Error) as e:
         piece.unlink(missing_ok=True)
-    temporary.replace(dest)
+        raise Stopped(f"I couldn't cut part {index + 1} of the recording. {RESUME_HINT}") from e
     return dest
 
 
@@ -306,7 +344,7 @@ def _separate(job: Job, env: Env) -> None:
                 found = env.diarize(str(_cut(job, index, env.run)), job.num_speakers, env.samples, end - start, True)
             except NoSpeech:
                 continue
-            people = {local: linker.person(vector) for local, vector in found.voices.items()}
+            people = linker.assign(found.voices)
             for turn in found.turns:
                 # Too little of this voice to compare: its time goes to its neighbours.
                 if turn.speaker in people:
@@ -350,7 +388,7 @@ def _transcribe(job: Job, env: Env) -> list[Timed]:
             ) from e
         except PapareoError as e:
             raise Stopped(f"I lost touch with Papa Reo on part {index + 1} of {total}. {RESUME_HINT}") from e
-        (_folder(job) / f"part-{index}.flac").unlink(missing_ok=True)
+        (_folder(job) / f"part-{index}.wav").unlink(missing_ok=True)
     return results
 
 
