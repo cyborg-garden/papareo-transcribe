@@ -172,19 +172,54 @@ def test_never_more_people_than_they_said(lj):
 
 def test_parts_are_sent_to_papa_reo_as_wav(plugin, lj, tmp_path):
     # Papa Reo's large endpoint fails every FLAC task (2026-11-12); WAV works.
-    import wave
     job, env, sent, said, _ = world(plugin, lj, tmp_path, speakers=False)
     run(plugin, lj, job, env)
     assert env.papareo.started and all(p.endswith(".wav") for p in env.papareo.started)
     assert len(sent) == 1
 
 
-def test_a_cut_part_is_a_real_wav(lj, plugin, tmp_path):
+def test_cut_parts_are_real_wavs_that_add_up_exactly(lj, plugin, tmp_path):
     import wave
     job, env, *_ = world(plugin, lj, tmp_path, speakers=False)
-    part = lj._cut(job, 0, env.run)
-    with wave.open(str(part), "rb") as w:
-        assert w.getnframes() > 0
+    source = lj._folder(job) / job.source
+    with wave.open(str(source), "rb") as w:
+        whole = w.getnframes()
+    total = 0
+    for i in range(len(job.parts)):
+        with wave.open(str(lj._cut(job, i, env.run)), "rb") as w:
+            total += w.getnframes()
+    assert total == whole
+
+
+def test_parts_are_not_left_on_disk_after_separation(plugin, lj, tmp_path):
+    job, env, *_ = world(plugin, lj, tmp_path, diarize=two_voices(plugin))
+    lj._separate(job, env)
+    assert not list(lj._folder(job).glob("part-*.wav"))
+
+
+def test_more_voices_than_people_never_makes_extra_people(lj):
+    linker = lj.VoiceLinker(2)
+    out = linker.assign({0: (1.0, 0.0, 0.0), 1: (0.0, 1.0, 0.0), 2: (0.0, 0.0, 1.0)})
+    assert set(out.values()) <= {0, 1}
+
+
+def test_a_forced_match_does_not_change_that_persons_voice(lj):
+    linker = lj.VoiceLinker(3)
+    linker.assign({0: (1.0, 0.0, 0.0), 1: (0.0, 1.0, 0.0), 2: (0.0, 0.0, 1.0)})
+    before = list(linker._people[2][0])
+    # Person 2 is silent in this part; person 0's voice is split in two.
+    linker.assign({0: (1.0, 0.02, 0.0), 1: (0.0, 1.0, 0.0), 5: (0.97, 0.0, 0.1)})
+    assert linker._people[2][0] == before
+
+
+def test_leftover_voices_go_to_the_closest_free_person_first(lj):
+    linker = lj.VoiceLinker(3)
+    linker.assign({0: (1.0, 0.0, 0.0), 1: (0.0, 1.0, 0.0)})
+    # The least alike voice comes first, so arrival order alone would get it wrong.
+    out = linker.assign({2: (0.0, 0.0, 1.0), 0: (1.0, 0.0, 0.0), 1: (0.0, 0.3, 0.95)})
+    # One place left. Voice 1 is closer to the free person 1, so it takes that
+    # place; voice 2, the least alike, becomes the new person.
+    assert out[1] == 1 and out[2] == 2
 
 
 def test_known_count_keeps_every_voice_in_a_part_apart(lj):

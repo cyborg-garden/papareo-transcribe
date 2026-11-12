@@ -290,16 +290,16 @@ def test_words_in_the_json_survive_an_empty_text_download(plugin):
 needs_ffmpeg = pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="ffmpeg not installed")
 
 
-def _flac(tmp_path):
+def _flac(tmp_path, rate=16000, channels=1, name="tone.flac"):
     import subprocess
     import wave
     src = tmp_path / "tone.wav"
     with wave.open(str(src), "wb") as w:
-        w.setnchannels(1)
+        w.setnchannels(channels)
         w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(b"\x00\x01" * 16000)
-    out = tmp_path / "tone.flac"
+        w.setframerate(rate)
+        w.writeframes(b"\x00\x01" * rate * channels)
+    out = tmp_path / name
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-c:a", "flac", str(out)], check=True)
     return out
 
@@ -315,11 +315,15 @@ def test_flac_is_sent_as_wav(plugin, tmp_path):
             return httpx.Response(200, json={"task_id": "t1"})
         return httpx.Response(200, json={"status": "PENDING"})
 
+    import glob
+    import tempfile
+    before = set(glob.glob(tempfile.gettempdir() + "/papareo-send-*"))
     flac = _flac(tmp_path)
     task = client(plugin, handler).start_task(str(flac))
     assert task == "t1"
     assert b'filename="tone.wav"' in seen["body"] and b"RIFF" in seen["body"]
-    assert flac.exists()  # the original is untouched; the WAV copy is gone
+    assert flac.exists()
+    assert set(glob.glob(tempfile.gettempdir() + "/papareo-send-*")) == before
 
 
 @needs_ffmpeg
@@ -337,3 +341,47 @@ def test_other_formats_are_sent_as_they_are(plugin, tmp_path):
     p.write_bytes(b"x")
     with plugin.papareo.sendable(p) as q:
         assert q == p
+
+
+
+@needs_ffmpeg
+def test_cd_quality_stereo_flac_becomes_16k_mono(plugin, tmp_path):
+    import wave
+    with plugin.papareo.sendable(_flac(tmp_path, rate=44100, channels=2)) as wav:
+        with wave.open(str(wav), "rb") as w:
+            assert (w.getframerate(), w.getnchannels()) == (16000, 1)
+
+
+@needs_ffmpeg
+def test_temp_copy_removed_when_the_upload_fails(plugin, tmp_path):
+    import glob
+    import tempfile
+    before = set(glob.glob(tempfile.gettempdir() + "/papareo-send-*"))
+    with pytest.raises(RuntimeError):
+        with plugin.papareo.sendable(_flac(tmp_path)):
+            raise RuntimeError("upload broke")
+    assert set(glob.glob(tempfile.gettempdir() + "/papareo-send-*")) == before
+
+
+@needs_ffmpeg
+def test_too_large_after_conversion_is_refused(plugin, tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin.papareo, "MAX_BYTES", 100)
+    with pytest.raises(plugin.papareo.PapareoError):
+        with plugin.papareo.sendable(_flac(tmp_path)):
+            pass
+
+
+@needs_ffmpeg
+def test_a_broken_flac_is_a_clean_error(plugin, tmp_path):
+    bad = tmp_path / "bad.flac"
+    bad.write_bytes(b"not audio at all")
+    with pytest.raises(plugin.papareo.PapareoError) as e:
+        with plugin.papareo.sendable(bad):
+            pass
+    assert "bad" not in str(e.value)
+
+
+@needs_ffmpeg
+def test_odd_file_names_are_handled(plugin, tmp_path):
+    with plugin.papareo.sendable(_flac(tmp_path, name="-x:y odd.flac")) as wav:
+        assert wav.is_file()

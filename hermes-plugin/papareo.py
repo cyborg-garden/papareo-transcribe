@@ -17,6 +17,7 @@ Verified live on 2026-10-18, both routes (scripts/papareo_do_transcribe.py).
 from __future__ import annotations
 
 import contextlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -28,7 +29,7 @@ from typing import Any
 
 import httpx
 
-from .speakers import Cue, parse_segments, parse_srt, same_words
+from .speakers import AUDIO_DEMUXERS, Cue, parse_segments, parse_srt, same_words
 
 BASE_URL = "https://api.papareo.io"
 SHORT_LIMIT_S = 290.0  # the short endpoint takes under five minutes
@@ -88,13 +89,15 @@ class Timed:
 
 # Papa Reo's large endpoint accepts a FLAC upload and then fails the task, at
 # any length (checked 2026-11-12). WAV and AAC work. Anything in this set is
-# converted to WAV, losslessly, just before it is sent.
+# converted to 16 kHz mono WAV just before it is sent: the same audio the
+# speaker separation and long jobs already use, and small enough that a
+# CD-quality hour stays well under MAX_BYTES.
 CONVERT_BEFORE_SENDING = {".flac"}
 
 
 @contextlib.contextmanager
 def sendable(p: Path) -> Iterator[Path]:
-    """``p``, or a temporary lossless WAV copy of it when Papa Reo can't take its format."""
+    """``p``, or a temporary 16 kHz mono WAV copy of it when Papa Reo can't take its format."""
     if p.suffix.lower() not in CONVERT_BEFORE_SENDING:
         yield p
         return
@@ -105,8 +108,11 @@ def sendable(p: Path) -> Iterator[Path]:
     out = Path(folder) / (p.stem + ".wav")
     try:
         done = subprocess.run(
-            [ffmpeg, "-nostdin", "-v", "error", "-y", "-i", str(p), "-c:a", "pcm_s16le", str(out)],
+            [ffmpeg, "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file",
+             "-format_whitelist", AUDIO_DEMUXERS, "-f", "flac", "-i", str(p.resolve()),
+             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", str(out)],
             capture_output=True, timeout=30 * 60,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": folder},
         )
         if done.returncode != 0 or not out.is_file():
             raise PapareoError("couldn't convert this recording for Papa Reo")

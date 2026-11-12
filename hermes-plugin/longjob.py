@@ -193,36 +193,59 @@ class VoiceLinker:
         to pass LINK_THRESHOLD, and without this they all collapsed into one
         person. Without a known number the separation may split one person in
         two, so each voice is linked on its own and may merge.
+
+        A match made only because every place is taken (below LINK_THRESHOLD)
+        still gets a label, but doesn't change that person's stored voice.
         """
         if self._limit is None:
             return {local: self.person(vector) for local, vector in voices.items()}
-        pairs = sorted(
-            ((self._cosine(vector, total), local, person)
-             for local, vector in voices.items()
-             for person, (total, _) in enumerate(self._people)),
-            reverse=True,
-        )
-        full = len(self._people) >= self._limit
+        existing = len(self._people)
+        score = {
+            (local, person): self._cosine(vector, self._people[person][0])
+            for local, vector in voices.items() for person in range(existing)
+        }
         out: dict[int, int] = {}
+        confident: set[int] = set()
         used: set[int] = set()
-        for score, local, person in pairs:
+        for (local, person), sim in sorted(score.items(), key=lambda kv: kv[1], reverse=True):
+            if sim < LINK_THRESHOLD:
+                break
             if local in out or person in used:
                 continue
-            if score >= LINK_THRESHOLD or full:
-                out[local] = person
-                used.add(person)
-        for local in voices:
-            if local in out:
-                continue
-            if len(self._people) < self._limit:
-                self._people.append(([0.0] * len(voices[local]), 0))
-                out[local] = len(self._people) - 1
-            else:
-                free = [p for p in range(len(self._people)) if p not in used]
-                pool = free or list(range(len(self._people)))
-                out[local] = max(pool, key=lambda p: self._cosine(voices[local], self._people[p][0]))
+            out[local] = person
+            used.add(person)
+            confident.add(local)
+        left = [local for local in voices if local not in out]
+        room = max(0, self._limit - existing)
+        free = [p for p in range(existing) if p not in used]
+
+        def out_local(person: int) -> int:
+            return next(l for l, p in out.items() if p == person)
+
+        def best_free(local: int) -> float:
+            return max((score[(local, p)] for p in free), default=-1.0)
+
+        # The least alike of the leftover voices become new people, up to the
+        # known number. The rest must share a place: closest free person
+        # first, or (more voices than people) the closest person at all.
+        left.sort(key=best_free, reverse=True)
+        n_new = min(room, len(left))
+        newcomers = left[len(left) - n_new:] if n_new else []
+        forced = left[: len(left) - n_new]
+        for local in newcomers:
+            self._people.append(([0.0] * len(voices[local]), 0))
+            out[local] = len(self._people) - 1
+            used.add(out[local])
+            confident.add(local)
+        for local in forced:
+            pool = [p for p in free if p not in used] or list(range(len(self._people)))
+            out[local] = max(pool, key=lambda p: self._cosine(
+                voices[local], self._people[p][0] if self._people[p][1] else voices[out_local(p)]
+            ))
             used.add(out[local])
         for local, person in out.items():
+            if local not in confident:
+                continue
             total, count = self._people[person]
             self._people[person] = ([x + y for x, y in zip(total, voices[local])], count + 1)
         return out
@@ -341,7 +364,13 @@ def _separate(job: Job, env: Env) -> None:
     try:
         for index, (start, end) in enumerate(job.parts):
             try:
-                found = env.diarize(str(_cut(job, index, env.run)), job.num_speakers, env.samples, end - start, True)
+                part = _cut(job, index, env.run)
+                try:
+                    found = env.diarize(str(part), job.num_speakers, env.samples, end - start, True)
+                finally:
+                    # Cutting again is cheap (no ffmpeg); keeping every WAV part
+                    # until it is sent would double a long job's disk use.
+                    part.unlink(missing_ok=True)
             except NoSpeech:
                 continue
             people = linker.assign(found.voices)
