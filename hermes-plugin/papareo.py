@@ -92,6 +92,8 @@ class Timed:
 # converted to 16 kHz mono WAV just before it is sent: the same audio the
 # speaker separation and long jobs already use, and small enough that a
 # CD-quality hour stays well under MAX_BYTES.
+# Only FLAC for now: sendable() reads its input with "-f flac", so adding another
+# suffix here also needs its demuxer passed there.
 CONVERT_BEFORE_SENDING = {".flac"}
 
 
