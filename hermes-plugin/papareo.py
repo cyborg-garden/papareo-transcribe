@@ -16,14 +16,20 @@ Verified live on 2026-10-18, both routes (scripts/papareo_do_transcribe.py).
 
 from __future__ import annotations
 
+import contextlib
+import os
+import shutil
+import subprocess
+import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from .speakers import Cue, parse_segments, parse_srt, same_words
+from .speakers import AUDIO_DEMUXERS, Cue, parse_segments, parse_srt, same_words
 
 BASE_URL = "https://api.papareo.io"
 SHORT_LIMIT_S = 290.0  # the short endpoint takes under five minutes
@@ -79,6 +85,46 @@ class Timed:
     cues: tuple[Cue, ...] = ()
     # Finer timings, for placing a split inside a cue. Never delivered.
     hints: tuple[Cue, ...] = ()
+
+
+# Papa Reo's large endpoint accepts a FLAC upload and then fails the task, at
+# any length (checked 2026-11-12). WAV and AAC work. Anything in this set is
+# converted to 16 kHz mono WAV just before it is sent: the same audio the
+# speaker separation and long jobs already use, and small enough that a
+# CD-quality hour stays well under MAX_BYTES.
+# Only FLAC for now: sendable() reads its input with "-f flac", so adding another
+# suffix here also needs its demuxer passed there.
+CONVERT_BEFORE_SENDING = {".flac"}
+
+
+@contextlib.contextmanager
+def sendable(p: Path) -> Iterator[Path]:
+    """``p``, or a temporary 16 kHz mono WAV copy of it when Papa Reo can't take its format."""
+    if p.suffix.lower() not in CONVERT_BEFORE_SENDING:
+        yield p
+        return
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise PapareoError("this recording's format needs ffmpeg, which isn't installed here")
+    folder = tempfile.mkdtemp(prefix="papareo-send-")  # mode 0700
+    out = Path(folder) / (p.stem + ".wav")
+    try:
+        done = subprocess.run(
+            [ffmpeg, "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file",
+             "-format_whitelist", AUDIO_DEMUXERS, "-f", "flac", "-i", str(p.resolve()),
+             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", str(out)],
+            capture_output=True, timeout=30 * 60,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": folder},
+        )
+        if done.returncode != 0 or not out.is_file():
+            raise PapareoError("couldn't convert this recording for Papa Reo")
+        if out.stat().st_size > MAX_BYTES:
+            raise PapareoError("recording is too large to send")
+        yield out
+    except subprocess.TimeoutExpired as e:
+        raise PapareoError("couldn't convert this recording for Papa Reo") from e
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 class PapareoClient:
@@ -196,8 +242,8 @@ class PapareoClient:
         raise PaidButLost(LOST)
 
     def _upload(self, c: httpx.Client, p: Path) -> str:
-        with p.open("rb") as f:
-            r = c.post("/tuhi/transcribe/large", files={"audio_file": (p.name, f, "application/octet-stream")})
+        with sendable(p) as q, q.open("rb") as f:
+            r = c.post("/tuhi/transcribe/large", files={"audio_file": (q.name, f, "application/octet-stream")})
         task = self._check(r, "upload")
         task_id = task.get("task_id") if isinstance(task, dict) else None
         if not isinstance(task_id, str) or not task_id:
@@ -256,10 +302,10 @@ class PapareoClient:
             raise PapareoError(f"Papa Reo {what} did not answer with JSON") from e
 
     def _short(self, c: httpx.Client, p: Path) -> str:
-        with p.open("rb") as f:
+        with sendable(p) as q, q.open("rb") as f:
             r = c.post(
                 "/tuhi/transcribe",
-                files={"audio_file": (p.name, f, "application/octet-stream")},
+                files={"audio_file": (q.name, f, "application/octet-stream")},
                 data={"with_metadata": "false"},
             )
         body = self._check(r, "transcription")
@@ -272,8 +318,8 @@ class PapareoClient:
 
     def _start_large(self, c: httpx.Client, p: Path) -> str:
         """Upload and wait until the transcript is ready. Returns the task id."""
-        with p.open("rb") as f:
-            r = c.post("/tuhi/transcribe/large", files={"audio_file": (p.name, f, "application/octet-stream")})
+        with sendable(p) as q, q.open("rb") as f:
+            r = c.post("/tuhi/transcribe/large", files={"audio_file": (q.name, f, "application/octet-stream")})
         task = self._check(r, "upload")
         task_id = task.get("task_id") if isinstance(task, dict) else None
         if not isinstance(task_id, str) or not task_id:
