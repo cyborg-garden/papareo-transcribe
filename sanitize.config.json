@@ -1,0 +1,36 @@
+{
+  "$comment": "Sanitization gate config for papareo-transcribe. The gate itself lives in cyborg-garden/swarm-map (docs/sanitization-gate.md); this file only says what a particular means here.",
+  "package_name": "papareo-transcribe",
+  "package_kind": "SHARED public package: a Hermes plugin and skill that transcribes voice recordings, shipped to every downstream deployment",
+  "sensitive_prefixes": [
+    "hermes-plugin/",
+    "hermes-skill/"
+  ],
+  "$comment_prefixes": "The plugin and skill installed into every agent. Top-level *.md are always included.",
+  "semantic": {
+    "domain_noun": "downstream deployment, speaker, recording or operator instance",
+    "flag_examples": [
+      "names of real speakers, or the content of a real recording or transcript",
+      "organisations tied to a specific deployment or customer",
+      "file names, recording IDs or URLs specific to one use case",
+      "a codename or label identifying a particular deployment or case",
+      "credentials, tokens, internal hostnames, server addresses or chat/group IDs of a real deployment"
+    ],
+    "do_not_flag_examples": [
+      "the publishing organisation and its public projects: Cyborg Garden / cyborg-garden / cyborg.garden, the former names NimbleCo / NimbleCoAI / NimbleCoOrg / nimbleco.ai, this repo's own name and GitHub URLs",
+      "Hermes, Swarm Map / swarm-map, the sibling oven-mitt / ovenmitt",
+      "Papa Reo, Te Hiku Media, papareo.io, the Kaitiakitanga License and its public terms, te reo Māori, and the whisper model names this package uses",
+      "generic tool, API, library, model, provider and standard names, and public reference material",
+      "clearly fictional placeholders (Subject A, <case>, example.com, <host>)"
+    ],
+    "model": "moonshotai/kimi-k3"
+  },
+  "deterministic": {
+    "enabled": true,
+    "allow_substrings": [],
+    "skip_paths": [
+      "tests/"
+    ],
+    "$comment_skip_paths": "Test code that holds credential-shaped fixtures on purpose. Provider tokens and private keys are still reported inside these paths."
+  }
+}
