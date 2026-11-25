@@ -729,3 +729,18 @@ def test_not_installed_leaves_the_clips(plugin, memo):
 
 def test_a_lone_surrogate_does_not_lose_the_transcript(plugin):
     assert plugin.papareo.with_footer("kia \ud800 ora").startswith(b"kia ? ora")
+
+
+def test_speaker_times_reach_separation_and_imply_speakers(plugin, memo):
+    sp = plugin.speakers
+    seen = []
+
+    def diarize(path, n, samples, duration, times=None):
+        seen.append(times)
+        return sp.Diarized((sp.Turn(0, 2, 0), sp.Turn(2, 4, 1)), {0: "Moana"})
+
+    w, deps = _timed_world(plugin, diarize)
+    times = {"Moana": [(0.5, 1.5)]}
+    r = plugin.transcribe.run(str(memo), "papareo", deps, speaker_times=times)
+    assert seen == [times]
+    assert r["sent"] is True and "[00:00] Moana" in w.local_sent[0][1]

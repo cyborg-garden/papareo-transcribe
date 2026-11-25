@@ -39,7 +39,7 @@ from .speakers import Diarizer  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 KEY_ENV = "PAPAREO_API_KEY"
 SOCKET_ENV = "OVENMITT_SOCKET"
@@ -65,7 +65,9 @@ SCHEMA: dict[str, Any] = {
         "to read it. Give path for a file they sent, or url for a share link to one file (direct, "
         "OneDrive, Google Drive, Dropbox). speakers=true labels who spoke when, on this machine. "
         "voice_samples names speakers from short clips of each person; only use it when each person "
-        "has agreed, and nothing about their voice is kept. Papa Reo recordings over an hour run in the "
+        "has agreed, and nothing about their voice is kept. speaker_times: moments the person says "
+        "each speaker talks in this recording, like {\"Moana\": \"1:20-1:30, 4:05\"}; it helps a lot, "
+        "so ask for one or two per person when they want speakers. Papa Reo recordings over an hour run in the "
         "background in parts: the first call explains what to confirm with the person."
     ),
     "parameters": {
@@ -78,6 +80,12 @@ SCHEMA: dict[str, Any] = {
             "voice_samples": {
                 "type": "object",
                 "description": "Person's name -> path of a short clip of them, if the person sent clips.",
+                "additionalProperties": {"type": "string"},
+            },
+            "speaker_times": {
+                "type": "object",
+                "description": "Person's name -> when they talk in this recording, as the person said it: "
+                "times like '1:20' or ranges like '1:20-1:30', separated by commas.",
                 "additionalProperties": {"type": "string"},
             },
             "long_job_ok": {"type": "boolean", "description": "True only once the person has agreed to a long job."},
@@ -174,12 +182,74 @@ def _read_samples(raw: Any) -> tuple[dict[str, str], str | None]:
         if not (isinstance(name, str) and isinstance(path, str) and path):
             return {}, bad
         # A name goes on a line of its own in the transcript: it can't add lines.
-        clean = re.sub(r"[\x00-\x1f\x7f\u2028\u2029]+", " ", name).strip()[:60]
+        clean = re.sub(r"[\x00-\x1f\x7f\u200e\u200f\u061c\u2028-\u202e\u2066-\u2069]+", " ", name).strip()[:60]
         clean = clean.encode("utf-8", "replace").decode("utf-8")
         if not clean or clean in samples:
             return {}, bad
         samples[clean] = path
     return samples, None
+
+
+MAX_TIMES_PER_PERSON = 10
+# A single moment ("1:20") stands for this much speech from there.
+MOMENT_S = 5.0
+_CLOCK = re.compile(r"^\s*(?:(\d{1,2}):)?(?:(\d{1,3}):)?(\d{1,5}(?:\.\d+)?)\s*$")
+
+
+def _clock_seconds(text: str) -> float | None:
+    """'1:20' or '1:02:03' or '80' as seconds."""
+    m = _CLOCK.match(text)
+    if not m:
+        return None
+    parts = [p for p in m.groups() if p is not None]
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60 + float(part)
+    return seconds
+
+
+def _read_times(raw: Any) -> tuple[dict[str, list[tuple[float, float]]], str | None]:
+    """speaker_times as {name: [(start, end), ...]} in seconds, also when it arrives
+    as a JSON string. A single moment covers the next MOMENT_S seconds."""
+    if raw in (None, "", {}):
+        return {}, None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    bad = (
+        "speaker_times must map each person's name to when they talk, like "
+        '{"Moana": "1:20-1:30, 4:05"}'
+    )
+    if not isinstance(raw, dict):
+        return {}, bad
+    times: dict[str, list[tuple[float, float]]] = {}
+    for name, value in raw.items():
+        if not isinstance(name, str):
+            return {}, bad
+        items = value if isinstance(value, list) else str(value).replace(";", ",").split(",")
+        clean = re.sub(r"[\x00-\x1f\x7f\u200e\u200f\u061c\u2028-\u202e\u2066-\u2069]+", " ", name).strip()[:60]
+        clean = clean.encode("utf-8", "replace").decode("utf-8")
+        if not clean or clean in times:
+            return {}, bad
+        bands: list[tuple[float, float]] = []
+        for item in items:
+            text = str(item).strip().replace("–", "-").replace("—", "-")
+            if not text:
+                continue
+            ends = re.split(r"\s*(?:-|\bto\b)\s*", text)
+            if len(ends) not in (1, 2) or not all(ends):
+                return {}, bad
+            start = _clock_seconds(ends[0])
+            end = _clock_seconds(ends[1]) if len(ends) == 2 else (start + MOMENT_S if start is not None else None)
+            if start is None or end is None or end <= start:
+                return {}, bad
+            bands.append((start, end))
+        if not bands or len(bands) > MAX_TIMES_PER_PERSON:
+            return {}, bad
+        times[clean] = bands
+    return times, None
 
 
 def _read_count(raw: Any) -> tuple[int | None, str | None]:
@@ -299,7 +369,8 @@ def register(ctx: Any) -> None:
         return {"sent": False, "started": True, "next": longjob.NEXT_STARTED}
 
     def begin_long(
-        path: str, duration: float, speakers: bool, count: int | None, samples: dict[str, str], agreed: bool, ours: bool
+        path: str, duration: float, speakers: bool, count: int | None, samples: dict[str, str], agreed: bool, ours: bool,
+        times: dict[str, list[tuple[float, float]]] | None = None,
     ) -> dict:
         problem = longjob.refusal(path, duration, speakers, count, deps.diarize, transcribe.direct_ok(deps))
         if problem:
@@ -317,7 +388,7 @@ def register(ctx: Any) -> None:
             return {"sent": False, "error": "this conversation has no chat to send to"}
         job = longjob.reserve(
             path, duration, chat.platform, chat.chat_id, deliver.filename_for(path, deps.now()), speakers, count,
-            shutil.move if ours else shutil.copyfile, chat.thread_id, chat.profile, bool(samples),
+            shutil.move if ours else shutil.copyfile, chat.thread_id, chat.profile, bool(samples), times,
         )
         env = job_env(samples, chat.attach, chat.say, path)
         if not longjob.start(lambda: run_long(job, env)):
@@ -343,7 +414,8 @@ def register(ctx: Any) -> None:
         wanted = args.get("speakers") is True or str(args.get("speakers")).lower() == "true"
         samples, bad = _read_samples(args.get("voice_samples"))
         count, bad_count = _read_count(args.get("num_speakers"))
-        problem = bad or bad_count
+        times, bad_times = _read_times(args.get("speaker_times"))
+        problem = bad or bad_count or bad_times
         if problem:
             # Before anything is spent: dropping it quietly would lose the labels they asked for.
             return json.dumps({"sent": False, "error": problem}, ensure_ascii=False)
@@ -375,7 +447,10 @@ def register(ctx: Any) -> None:
                 if seconds > longjob.LONG_AFTER_S:
                     agreed = args.get("long_job_ok") is True or str(args.get("long_job_ok")).lower() == "true"
                     return json.dumps(
-                        begin_long(path, seconds, wanted or bool(samples) or bool(count), count, samples, agreed, bool(tmp)),
+                        begin_long(
+                            path, seconds, wanted or bool(samples) or bool(count) or bool(times), count, samples,
+                            agreed, bool(tmp), times,
+                        ),
                         ensure_ascii=False,
                     )
 
@@ -385,7 +460,7 @@ def register(ctx: Any) -> None:
 
             result = transcribe.run(
                 path, engine, deps, chosen_by_person=chosen, speakers=wanted, num_speakers=count,
-                voice_samples=samples, samples_used=mark_used,
+                voice_samples=samples, samples_used=mark_used, speaker_times=times,
             )
             return json.dumps(result, ensure_ascii=False)
         finally:

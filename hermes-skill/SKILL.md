@@ -43,13 +43,18 @@ If they send a share link to a recording instead of a file, pass it as `url` ins
 
 ## Speakers
 
-If they want to know who said what, ask how many people are in the recording unless they've said, because guessing is unreliable on real recordings. Then set `speakers: true` and `num_speakers`. If they don't know, leave `num_speakers` out; if it hears an unlikely number of voices it stops before Papa Reo is charged and tells you to ask. This runs on this machine, costs nothing extra and adds labels like "Speaker 1". If it can't run, Papa Reo isn't charged and the result says so: ask whether they want the transcript without labels. The labels are a machine's guess, and the file says so. They're coarse on purpose: brief interjections and overlapping talk go to whoever spoke most of that sentence.
+If they want to know who said what, ask two things in one short message, in plain words:
+
+- how many people talk in it, if they know;
+- for each person, one or two moments when only that person is talking, with their name. For example: "Moana talks at 1:20, Aroha from 4:05 to 4:15". Say it's optional and that it makes the labels much better, because voices in one room can sound alike.
+
+Then set `speakers: true`, `num_speakers` if they said, and `speaker_times` with each name and the moments as they wrote them (`{"Moana": "1:20", "Aroha": "4:05-4:15"}`). If they skip the moments, leave `speaker_times` out. The number is an upper limit: if fewer people talk, it finds fewer. Those named get their name in the transcript instead of "Speaker 1". If `samples_not_matched` lists a name, nobody was talking at that moment: say so, and that you'd need a different moment next time. This runs on this machine and costs nothing extra. If it can't run, Papa Reo isn't charged and the result says so: ask whether they want the transcript without labels. The labels are a machine's guess, and the file says so. They're coarse on purpose: brief interjections and overlapping talk go to whoever spoke most of that sentence.
 
 To put names on the labels, they can send a short clip of each person. Pass those as `voice_samples`, with each person's name and the clip's path. Only do this when each person has agreed to it: ask if you aren't sure. The result's `samples_not_matched` lists anyone who wasn't recognised, and `samples_matched_too_briefly` anyone recognised who spoke too little to get a label: don't ask them for another clip. No voiceprint is kept, the clips are deleted once they've been used, and there is no way to keep a voice yet, so don't offer to remember one.
 
 ## Long recordings
 
-A Papa Reo recording over an hour runs in the background, in parts, up to 36 hours or 4GB. Links are the way to send these, because Signal stops at 100MB. Call as usual. The first answer has `needs_agreement`: tell them what it says and only call again with `long_job_ok: true` once they agree. If they want speakers it needs `num_speakers`, so ask. After that the file arrives by itself, however long it takes, and you don't need to do anything. Speaker numbers across parts are matched by machine and can slip.
+A Papa Reo recording over an hour runs in the background, in parts, up to 36 hours or 4GB. Links are the way to send these, because Signal stops at 100MB. Call as usual. The first answer has `needs_agreement`: tell them what it says and only call again with `long_job_ok: true` once they agree. If they want speakers it needs `num_speakers`, so ask, and ask for moments for each person as above. After that the file arrives by itself, however long it takes, and you don't need to do anything. Speaker numbers across parts are matched by machine and can slip.
 
 Only one stopped job waits per chat: a new long recording asks them to carry on or give it up (`discard_job: true`) first. If a job stops, it says so in the chat. When they ask to carry on, call with only `engine`, `chosen_by_person` and `resume_job: true`. Parts already done aren't paid for again. If they ask about one that seems to have vanished, because the agent restarted, try the same thing.
 
