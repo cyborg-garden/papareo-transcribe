@@ -773,3 +773,29 @@ def test_recovery_never_spins_when_it_cannot_save(plugin, lj, tmp_path, monkeypa
     recover(lj, lambda j: (lambda *a: None, said.append), lambda *a: None, allowed=lambda j: False)
     assert len(said) == 1
 
+
+
+def test_a_failed_upload_says_why(plugin, lj, tmp_path, caplog):
+    client = FakeClient(plugin)
+
+    def refused(path):
+        raise plugin.papareo.PapareoError("Papa Reo upload failed with HTTP 413")
+
+    client.start_task = refused
+    job, env, sent, said, _ = world(plugin, lj, tmp_path, speakers=False, count=None, papareo=client)
+    with caplog.at_level("WARNING"):
+        run(plugin, lj, job, env)
+    assert "HTTP 413" in said[0]
+    assert "HTTP 413" in caplog.text
+
+
+def test_losing_touch_says_why(plugin, lj, tmp_path, caplog):
+    PaidButLost, PapareoError = plugin.papareo.PaidButLost, plugin.papareo.PapareoError
+    lost = PaidButLost("Papa Reo may have charged for this")
+    lost.__cause__ = PapareoError("Papa Reo status check failed with HTTP 502")
+    client = FakeClient(plugin, fail={"task-0": lost})
+    job, env, sent, said, _ = world(plugin, lj, tmp_path, speakers=False, count=None, papareo=client)
+    with caplog.at_level("WARNING"):
+        run(plugin, lj, job, env)
+    assert "HTTP 502" in said[0]
+    assert "HTTP 502" in caplog.text
