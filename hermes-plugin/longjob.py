@@ -476,7 +476,7 @@ def _notes(job: Job, env: Env, results: Sequence[Timed]) -> str:
 
 
 def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], caption: str) -> None:
-    """The whole job. Tells the person how it ended, and logs counts only."""
+    """The whole job. Tells the person how it ended. Logs counts and our own error wording only, never text."""
     try:
         job.state = "running"
         save(job)
