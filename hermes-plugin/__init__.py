@@ -182,7 +182,7 @@ def _read_samples(raw: Any) -> tuple[dict[str, str], str | None]:
         if not (isinstance(name, str) and isinstance(path, str) and path):
             return {}, bad
         # A name goes on a line of its own in the transcript: it can't add lines.
-        clean = re.sub(r"[\x00-\x1f\x7f\u2028\u2029]+", " ", name).strip()[:60]
+        clean = re.sub(r"[\x00-\x1f\x7f\u200e\u200f\u2028-\u202e\u2066-\u2069]+", " ", name).strip()[:60]
         clean = clean.encode("utf-8", "replace").decode("utf-8")
         if not clean or clean in samples:
             return {}, bad
@@ -193,7 +193,7 @@ def _read_samples(raw: Any) -> tuple[dict[str, str], str | None]:
 MAX_TIMES_PER_PERSON = 10
 # A single moment ("1:20") stands for this much speech from there.
 MOMENT_S = 5.0
-_CLOCK = re.compile(r"^\s*(?:(\d{1,2}):)?(?:(\d{1,3}):)?(\d{1,5}(?:[.,]\d+)?)\s*$")
+_CLOCK = re.compile(r"^\s*(?:(\d{1,2}):)?(?:(\d{1,3}):)?(\d{1,5}(?:\.\d+)?)\s*$")
 
 
 def _clock_seconds(text: str) -> float | None:
@@ -204,7 +204,7 @@ def _clock_seconds(text: str) -> float | None:
     parts = [p for p in m.groups() if p is not None]
     seconds = 0.0
     for part in parts:
-        seconds = seconds * 60 + float(part.replace(",", "."))
+        seconds = seconds * 60 + float(part)
     return seconds
 
 
@@ -229,7 +229,7 @@ def _read_times(raw: Any) -> tuple[dict[str, list[tuple[float, float]]], str | N
         if not isinstance(name, str):
             return {}, bad
         items = value if isinstance(value, list) else str(value).replace(";", ",").split(",")
-        clean = re.sub(r"[\x00-\x1f\x7f\u2028\u2029]+", " ", name).strip()[:60]
+        clean = re.sub(r"[\x00-\x1f\x7f\u200e\u200f\u2028-\u202e\u2066-\u2069]+", " ", name).strip()[:60]
         clean = clean.encode("utf-8", "replace").decode("utf-8")
         if not clean or clean in times:
             return {}, bad
@@ -238,8 +238,8 @@ def _read_times(raw: Any) -> tuple[dict[str, list[tuple[float, float]]], str | N
             text = str(item).strip().replace("–", "-").replace("—", "-")
             if not text:
                 continue
-            ends = [p for p in re.split(r"\s*(?:-|to)\s*", text) if p]
-            if len(ends) not in (1, 2):
+            ends = re.split(r"\s*(?:-|\bto\b)\s*", text)
+            if len(ends) not in (1, 2) or not all(ends):
                 return {}, bad
             start = _clock_seconds(ends[0])
             end = _clock_seconds(ends[1]) if len(ends) == 2 else (start + MOMENT_S if start is not None else None)

@@ -35,8 +35,18 @@ MIN_WINDOW_S = 0.8
 MIN_EMBED_S = 0.3
 # The most people guessed when nobody said how many.
 MAX_AUTO_SPEAKERS = 8
+# Below this many windows (about a minute of speech) the count is chosen by
+# how well the groups hold together, not by the spectrum.
+SMALL_N = 40
+# Groups holding together worse than this are one person. Set on real clips:
+# one person alone scored 0.23-0.26, two people talking 0.48.
+SILHOUETTE_MIN = 0.3
+# Two groups whose average voices are at least this alike (cosine) are one person.
+SAME_VOICE = 0.75
 # Each window keeps only its closest neighbours, so a loud room doesn't tie everyone together.
 PRUNE_KEEP = 0.15
+# ...but never so few that a short recording falls apart into many voices.
+MIN_NEIGHBOURS = 6
 KMEANS_TRIES = 8
 KMEANS_ROUNDS = 60
 # A lone window shorter than this, between two of the same speaker, joins them.
@@ -101,7 +111,7 @@ def windows_of(pieces: list[tuple[float, float]]) -> list[tuple[float, float]]:
 def affinity(E: np.ndarray) -> np.ndarray:
     A = np.clip(E @ E.T, 0.0, None)
     n = len(A)
-    keep = min(n, max(2, math.ceil(PRUNE_KEEP * n)))
+    keep = min(n, max(2, min(MIN_NEIGHBOURS, n // 2), math.ceil(PRUNE_KEEP * n)))
     if keep < n:
         cut = np.partition(A, n - keep, axis=1)[:, n - keep][:, None]
         A = np.where(A >= cut, A, 0.0)
@@ -170,15 +180,68 @@ def group(E: np.ndarray, wanted: int | None, fixed: dict[int, int]) -> np.ndarra
         return np.array([fixed.get(i, 0) for i in range(n)], dtype=int)
     values, vectors = spectrum(affinity(E))
     low = max(1, pinned)
-    k = choose_k(values, low, max(low, wanted or MAX_AUTO_SPEAKERS))
-    k = min(k, n)
-    if k <= 1:
+    high = min(n, max(low, wanted or MAX_AUTO_SPEAKERS))
+
+    def split(k: int) -> np.ndarray:
+        if k <= 1:
+            return np.zeros(n, dtype=int)
+        U = vectors[:, :k]
+        norms = np.linalg.norm(U, axis=1, keepdims=True)
+        labels = kmeans(U / np.where(norms > 0, norms, 1), k, fixed)
+        return refine(E, labels, fixed) if fixed else labels
+
+    if n >= SMALL_N:
+        return merge_alike(E, split(min(choose_k(values, low, high), n)), pinned)
+    # Too few windows for the spectrum to be trusted: try each count and keep
+    # the one whose groups hold together best.
+    best, best_score = split(low), -math.inf
+    for k in range(max(2, low), high + 1):
+        labels = split(k)
+        score = silhouette(E, labels)
+        if score > best_score:
+            best, best_score = labels, score
+    if low == 1 and best_score < SILHOUETTE_MIN:
         return np.zeros(n, dtype=int)
-    U = vectors[:, :k]
-    norms = np.linalg.norm(U, axis=1, keepdims=True)
-    U = U / np.where(norms > 0, norms, 1)
-    labels = kmeans(U, k, fixed)
-    return refine(E, labels, fixed) if fixed else labels
+    return merge_alike(E, best, pinned)
+
+
+def merge_alike(E: np.ndarray, labels: np.ndarray, pinned: int) -> np.ndarray:
+    """Groups whose average voices are this alike are one person split in two.
+    Groups below ``pinned`` are named people and never merge with each other."""
+    labels = labels.copy()
+    while True:
+        groups = sorted(set(int(x) for x in labels))
+        centres = {g: _unit(E[labels == g].mean(axis=0)) for g in groups}
+        pairs = [
+            (float(centres[a] @ centres[b]), a, b)
+            for i, a in enumerate(groups) for b in groups[i + 1 :]
+            if centres[a] is not None and centres[b] is not None and not (a < pinned and b < pinned)
+        ]
+        if not pairs:
+            return labels
+        score, a, b = max(pairs)
+        if score < SAME_VOICE:
+            return labels
+        labels[labels == b] = a
+
+
+def silhouette(E: np.ndarray, labels: np.ndarray) -> float:
+    """How well each fingerprint sits in its own group rather than the nearest
+    other one, from -1 to 1, by cosine distance."""
+    groups = sorted(set(int(x) for x in labels))
+    if len(groups) < 2:
+        return -1.0
+    D = 1 - E @ E.T
+    scores = []
+    for i in range(len(E)):
+        own = labels == labels[i]
+        if own.sum() <= 1:
+            scores.append(0.0)
+            continue
+        a = D[i, own].sum() / (own.sum() - 1)
+        b = min(D[i, labels == g].mean() for g in groups if g != labels[i])
+        scores.append((b - a) / max(a, b) if max(a, b) > 0 else 0.0)
+    return float(np.mean(scores))
 
 
 def refine(E: np.ndarray, labels: np.ndarray, fixed: dict[int, int]) -> np.ndarray:
@@ -276,16 +339,26 @@ def separate(request: dict, audio: np.ndarray, segment, extractor) -> dict:
             rows.append(v)
             row_span.append((a, b))
 
-    # Pin the moments the person pointed to. A window claimed by two people is
-    # left unpinned rather than guessed.
-    claims: dict[int, set[int]] = {}
+    # Pin the moments the person pointed to. A moment that overlaps another
+    # person's is dropped for both rather than guessed, so every pinned window
+    # belongs to exactly one name.
+    def overlaps(a: tuple[float, float], b: tuple[float, float]) -> bool:
+        return min(a[1], b[1]) > max(a[0], b[0])
+
+    clear = {
+        name: [
+            band for band in bands
+            if not any(overlaps(band, other) for o, theirs in anchors.items() if o != name for other in theirs)
+        ]
+        for name, bands in anchors.items()
+    }
+    fixed: dict[int, int] = {}
     anchor_group: dict[str, int] = {}
     missing: list[str] = []
-    for name, bands in anchors.items():
-        g = len(anchor_group)
+    for name, bands in clear.items():
         hits: list[int] = []
         for i, span in enumerate(row_span):
-            if span is not None and any(s <= (span[0] + span[1]) / 2 <= e for s, e in bands):
+            if span is not None and i not in fixed and any(s <= (span[0] + span[1]) / 2 <= e for s, e in bands):
                 hits.append(i)
         for s, e in bands:
             v = embed_long(extractor, audio[int(s * RATE) : int(e * RATE)])
@@ -294,12 +367,11 @@ def separate(request: dict, audio: np.ndarray, segment, extractor) -> dict:
                 row_span.append(None)
                 hits.append(len(rows) - 1)
         if hits:
+            g = len(anchor_group)  # groups 0..a-1, with no gaps: kmeans relies on it
             anchor_group[name] = g
-            for i in hits:
-                claims.setdefault(i, set()).add(g)
+            fixed.update({i: g for i in hits})
         else:
             missing.append(name)
-    fixed = {i: next(iter(gs)) for i, gs in claims.items() if len(gs) == 1}
 
     E = np.array(rows) if rows else np.zeros((0, 1))
     labels = group(E, request.get("num_speakers") or None, fixed)

@@ -237,3 +237,14 @@ def test_bad_speaker_times_are_refused_with_an_example(plugin):
         assert times == {} and "1:20-1:30" in bad
     names, _ = plugin._read_times({"Aroha\n[00:00] Someone else": "1:00"})
     assert all("\n" not in n for n in names)
+
+
+def test_speaker_times_refuse_half_written_ranges(plugin):
+    for raw in ({"Moana": "-5"}, {"Moana": "1:20-"}, {"Moana": "1:20 to"}):
+        assert plugin._read_times(raw)[0] == {}
+
+
+def test_names_lose_invisible_direction_marks(plugin):
+    times, _ = plugin._read_times({"Mo‮ana": "1:00"})
+    samples, _ = plugin._read_samples({"Ar⁦oha": "/a.ogg"})
+    assert list(times) == ["Mo ana"] and list(samples) == ["Ar oha"]

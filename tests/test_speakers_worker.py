@@ -40,7 +40,9 @@ def voices(count, closeness=0.0, seed=1):
 
 
 class FakeExtractor:
-    def __init__(self, bank, noise=0.25, seed=2):
+    # noise 0.15 puts a window about as close to its speaker's average voice as
+    # real fingerprints are (cosine ~0.75).
+    def __init__(self, bank, noise=0.15, seed=2):
         self.bank = bank
         self.noise = noise
         self.rng = np.random.default_rng(seed)
@@ -114,7 +116,7 @@ def agreement(turns, truth):
     return sum(n for (who, got), n in pairs.items() if best.get(who) == got) / total
 
 
-def run(script, bank, noise=0.25, **request):
+def run(script, bank, noise=0.15, **request):
     audio, truth = recording(script)
     found = worker.separate(request, audio, segmenter(truth), FakeExtractor(bank, noise=noise))
     return found, truth
@@ -194,3 +196,30 @@ def test_speakers_are_numbered_in_order_of_first_appearance():
             seen.append(t["speaker"])
     assert seen == sorted(seen)
     assert set(found["voices"]) == set(seen)
+
+
+def test_a_name_that_loses_every_moment_is_unmatched_not_a_crash():
+    script = [(2, 0), (2, 1), (2, 0), (2, 1), (2, 0)]
+    found, _ = run(script, voices(2), num_speakers=2, anchors={"A": [[0, 2]], "B": [[2.9, 3.1]], "C": [[2, 4]]})
+    assert "B" in found["unmatched"] or "C" in found["unmatched"]
+    names = {int(k): v for k, v in found["names"].items()}
+    assert names.get(who_at(found["turns"], 1)) == "A"
+
+
+def test_two_names_at_the_same_moment_name_nobody_there():
+    found, _ = run(CONVERSATION, voices(3), anchors={"Moana": [[13, 17]], "Aroha": [[13, 17]]})
+    assert found["names"] == {}
+    assert sorted(found["unmatched"]) == ["Aroha", "Moana"]
+
+
+@pytest.mark.parametrize("seconds", [16, 24, 40])
+def test_a_short_recording_is_not_split_into_many(seconds):
+    script = [(4, i % 2) for i in range(seconds // 4)]
+    found, truth = run(script, voices(2))
+    assert len({t["speaker"] for t in found["turns"]}) == 2
+
+
+@pytest.mark.parametrize("seconds", [8, 16, 40])
+def test_one_person_alone_stays_one_person(seconds):
+    found, _ = run([(4, 0)] * (seconds // 4), voices(1))
+    assert len({t["speaker"] for t in found["turns"]}) == 1
