@@ -110,6 +110,21 @@ class Stopped(Exception):
     carries transcript text."""
 
 
+def _why(e: BaseException) -> str:
+    """The most specific reason Papa Reo gave, e.g. "upload failed with HTTP 413".
+    Only our own PapareoError wording is used, never a response body, so it can't
+    carry transcript text. Anything else is named by its type."""
+    reason = ""
+    seen: BaseException | None = e
+    while seen is not None:
+        if isinstance(seen, PapareoError) and str(seen) and not str(seen).startswith("Papa Reo may have charged"):
+            reason = str(seen)
+        elif not reason and not isinstance(seen, PapareoError):
+            reason = type(seen).__name__
+        seen = seen.__cause__
+    return reason.removeprefix("Papa Reo ") or "no reason given"
+
+
 def measure(path: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> float | None:
     """A recording's length by decoding it, for files whose header doesn't say. None
     if that can't be told. Reads the whole file, so only use it when probing failed."""
@@ -402,7 +417,7 @@ def _transcribe(job: Job, env: Env) -> list[Timed]:
                 job.tasks[index] = env.papareo.start_task(str(part))
             except PapareoError as e:
                 raise Stopped(
-                    f"Sending part {index + 1} of {total} to Papa Reo failed. Ask me to resume and I'll send it again. "
+                    f"Sending part {index + 1} of {total} to Papa Reo failed ({_why(e)}). Ask me to resume and I'll send it again. "
                     "If Papa Reo had already received it, that part could be charged twice. Other finished parts aren't."
                 ) from e
             save(job)
@@ -412,11 +427,11 @@ def _transcribe(job: Job, env: Env) -> list[Timed]:
             job.tasks[index] = None
             save(job)
             raise Stopped(
-                f"Papa Reo reports that part {index + 1} of {total} failed. Ask me to resume and I'll send it again, "
+                f"Papa Reo reports that part {index + 1} of {total} failed ({_why(e)}). Ask me to resume and I'll send it again, "
                 "which may be charged. Other finished parts aren't."
             ) from e
         except PapareoError as e:
-            raise Stopped(f"I lost touch with Papa Reo on part {index + 1} of {total}. {RESUME_HINT}") from e
+            raise Stopped(f"I lost touch with Papa Reo on part {index + 1} of {total} ({_why(e)}). {RESUME_HINT}") from e
         (_folder(job) / f"part-{index}.wav").unlink(missing_ok=True)
     return results
 
@@ -517,7 +532,7 @@ def run_job(job: Job, env: Env, lay_out: Callable[..., tuple[str, Any, bool]], c
         logger.info("papareo_transcribe: long job sent (%d parts)", len(job.parts))
         forget(job)
     except Stopped as e:
-        logger.warning("papareo_transcribe: long job stopped after %d parts", sum(t is not None for t in job.tasks))
+        logger.warning("papareo_transcribe: long job stopped after %d parts: %s", sum(t is not None for t in job.tasks), e)
         _mark_stopped(job)
         env.say(str(e))
     except Exception as e:  # noqa: BLE001
