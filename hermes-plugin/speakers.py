@@ -386,7 +386,10 @@ class Diarizer:
         samples: Mapping[str, str] | None = None,
         duration: float | None = None,
         want_voices: bool = False,
+        times: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     ) -> Diarized:
+        """``times`` are moments the person said each speaker talks, in seconds into
+        this recording: they pin that voice to that name."""
         problem = self.why_not()
         if problem:
             raise DiarizeError(problem)
@@ -407,6 +410,7 @@ class Diarizer:
                 "num_speakers": num_speakers,
                 "samples": sample_wavs,
                 "want_voices": want_voices,
+                "anchors": {name: [[float(a), float(b)] for a, b in bands] for name, bands in (times or {}).items()},
             }
             started = True
             done = self._run(

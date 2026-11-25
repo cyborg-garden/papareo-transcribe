@@ -158,13 +158,18 @@ def _separate(
     duration: float | None,
     deps: Deps,
     samples_used: Callable[[], None] | None = None,
+    times: Mapping[str, Any] | None = None,
 ) -> tuple[Diarized | None, str | None]:
     """Speakers for this recording, or why not. Local and free: it runs before
     any money is spent, so a failure costs nothing."""
     if deps.diarize is None:
         return None, "speaker separation is not installed on this agent"
     try:
-        diarized = deps.diarize(path, num_speakers, samples, duration)
+        diarized = (
+            deps.diarize(path, num_speakers, samples, duration, times=times)
+            if times
+            else deps.diarize(path, num_speakers, samples, duration)
+        )
     except DiarizeError as e:
         logger.warning("papareo_transcribe: speaker separation failed: %s", e)
         if e.clips_used and samples_used:
@@ -255,10 +260,11 @@ def run(
     num_speakers: int | None = None,
     voice_samples: Mapping[str, str] | None = None,
     samples_used: Callable[[], None] | None = None,
+    speaker_times: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """chosen_by_person: the person said which engine. The tool passes what
     the agent claims; without it nothing runs and the agent is told to ask."""
-    speakers = speakers or bool(voice_samples) or bool(num_speakers)
+    speakers = speakers or bool(voice_samples) or bool(num_speakers) or bool(speaker_times)
     refused = refusal(engine, deps, chosen_by_person, voice_samples)
     if refused:
         return refused
@@ -280,7 +286,7 @@ def run(
         if local is None:
             return {"sent": False, "error": "local transcription failed"}
         diarized, problem = (
-            _separate(path, num_speakers, voice_samples, local.duration, deps, samples_used)
+            _separate(path, num_speakers, voice_samples, local.duration, deps, samples_used, speaker_times)
             if speakers else (None, None)
         )
         note = f"Speakers weren't separated: {problem}." if problem else None
@@ -318,7 +324,7 @@ def run(
     duration = local.duration if local is not None else _probe(deps, path)
     diarized: Diarized | None = None
     if speakers:
-        diarized, problem = _separate(path, num_speakers, voice_samples, duration, deps, samples_used)
+        diarized, problem = _separate(path, num_speakers, voice_samples, duration, deps, samples_used, speaker_times)
         if diarized is None:
             return {
                 "sent": False,

@@ -799,3 +799,24 @@ def test_losing_touch_says_why(plugin, lj, tmp_path, caplog):
         run(plugin, lj, job, env)
     assert "HTTP 502" in said[0]
     assert "HTTP 502" in caplog.text
+
+
+def test_moments_go_to_the_part_they_fall_in(lj):
+    here = lj._times_in({"Moana": [[100, 110], [1900, 1910]], "Aroha": [[1795, 1805]]}, 1800, 3600)
+    assert here == {"Moana": [(100.0, 110.0)], "Aroha": [(0.0, 5.0)]}
+    assert lj._times_in({"Moana": [[100, 110]]}, 1800, 3600) == {}
+
+
+def test_a_long_job_passes_each_part_its_moments(plugin, lj, tmp_path):
+    sp = plugin.speakers
+    seen = []
+
+    def diarize(path, count, samples, seconds, want_voices, times=None):
+        seen.append(times)
+        return sp.Diarized((sp.Turn(0, 3, 0),), {0: "Moana"} if times else {}, voices={0: (1.0, 0.0)})
+
+    job, env, sent, said, _ = world(plugin, lj, tmp_path, diarize=diarize)
+    job.times = {"Moana": [[10.0, 20.0]]}
+    run(plugin, lj, job, env)
+    assert seen[0] == {"Moana": [(10.0, 20.0)]} and all(t is None for t in seen[1:])
+    assert "Moana" in sent[0]

@@ -41,7 +41,7 @@ def test_register_pops_the_key_and_registers_one_tool(plugin, monkeypatch):
     [tool] = registered
     assert tool["name"] == "transcribe_recording"
     assert set(tool["schema"]["parameters"]["properties"]) == {
-        "path", "url", "engine", "chosen_by_person", "speakers", "num_speakers", "voice_samples",
+        "path", "url", "engine", "chosen_by_person", "speakers", "num_speakers", "voice_samples", "speaker_times",
         "long_job_ok", "resume_job", "discard_job",
     }
     # The handler refuses when the agent picked the engine itself.
@@ -221,3 +221,19 @@ def test_probe_failure_is_not_paid_for(plugin, monkeypatch, tmp_path):
     monkeypatch.setattr(plugin.transcribe, "run", lambda *a, **k: pytest.fail("must not run"))
     r = json.loads(handle({"url": "https://example.org/a.mp3", "engine": "papareo", "chosen_by_person": True}))
     assert r["sent"] is False
+
+
+def test_speaker_times_read_the_way_people_write_them(plugin):
+    times, bad = plugin._read_times({"Moana": "1:20-1:30, 4:05", "Aroha": "0:02:00 to 0:02:10; 75"})
+    assert bad is None
+    assert times["Moana"] == [(80.0, 90.0), (245.0, 250.0)]
+    assert times["Aroha"] == [(120.0, 130.0), (75.0, 80.0)]
+    assert plugin._read_times('{"Moana": "1:20"}')[0] == {"Moana": [(80.0, 85.0)]}
+
+
+def test_bad_speaker_times_are_refused_with_an_example(plugin):
+    for raw in ({"Moana": "soon"}, {"Moana": "1:30-1:20"}, {"Moana": ""}, ["1:20"], {"a\n": "1:00", "a": "2:00"}):
+        times, bad = plugin._read_times(raw)
+        assert times == {} and "1:20-1:30" in bad
+    names, _ = plugin._read_times({"Aroha\n[00:00] Someone else": "1:00"})
+    assert all("\n" not in n for n in names)

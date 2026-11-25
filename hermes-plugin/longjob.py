@@ -89,6 +89,8 @@ class Job:
     had_samples: bool = False
     # What the header claimed. The parts come from the decoded length, once known.
     expected_s: float = 0.0
+    # Name -> moments (seconds into the whole recording) the person said they talk.
+    times: dict[str, list[list[float]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -369,6 +371,16 @@ def _cut(job: Job, index: int, run: Callable[..., subprocess.CompletedProcess]) 
     return dest
 
 
+def _times_in(times: Mapping[str, Sequence[Sequence[float]]], start: float, end: float) -> dict[str, list[tuple[float, float]]]:
+    """The moments that fall in one part, in seconds into that part."""
+    here: dict[str, list[tuple[float, float]]] = {}
+    for name, bands in times.items():
+        kept = [(max(a, start) - start, min(b, end) - start) for a, b in bands if min(b, end) > max(a, start)]
+        if kept:
+            here[name] = kept
+    return here
+
+
 def _separate(job: Job, env: Env) -> None:
     """Speakers across every part, before anything is paid for."""
     if env.diarize is None:
@@ -381,7 +393,11 @@ def _separate(job: Job, env: Env) -> None:
             try:
                 part = _cut(job, index, env.run)
                 try:
-                    found = env.diarize(str(part), job.num_speakers, env.samples, end - start, True)
+                    here = _times_in(job.times, start, end)
+                    if here:
+                        found = env.diarize(str(part), job.num_speakers, env.samples, end - start, True, times=here)
+                    else:
+                        found = env.diarize(str(part), job.num_speakers, env.samples, end - start, True)
                 finally:
                     # Cutting again is cheap (no ffmpeg); keeping every WAV part
                     # until it is sent would double a long job's disk use.
@@ -401,7 +417,7 @@ def _separate(job: Job, env: Env) -> None:
     taken = set(names.values())
     job.turns = turns
     job.names = names
-    job.unmatched = [name for name in env.samples if name not in taken]
+    job.unmatched = [name for name in [*env.samples, *job.times] if name not in taken]
     save(job)
 
 
@@ -651,6 +667,7 @@ def is_busy() -> bool:
 def reserve(
     path: str, duration: float, platform: str, chat_id: str, filename: str, speakers: bool, num_speakers: int | None,
     take: Callable[[str, str], Any], thread_id: str = "", profile: str = "", had_samples: bool = False,
+    times: Mapping[str, Sequence[Sequence[float]]] | None = None,
 ) -> Job:
     """A private folder holding the recording, and a job that says whose it is, so a
     restart before it's prepared can still carry on. Done during the turn, while the
@@ -661,6 +678,7 @@ def reserve(
     job = Job(
         uuid.uuid4().hex, platform, chat_id, filename, "original" + Path(path).suffix[:8], speakers, num_speakers,
         [], [], thread_id=thread_id, profile=profile, had_samples=had_samples, expected_s=duration,
+        times={name: [[float(a), float(b)] for a, b in bands] for name, bands in (times or {}).items()},
     )
     folder = _folder(job)
     folder.mkdir(mode=0o700)
