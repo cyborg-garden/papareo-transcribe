@@ -182,7 +182,7 @@ def _read_samples(raw: Any) -> tuple[dict[str, str], str | None]:
         if not (isinstance(name, str) and isinstance(path, str) and path):
             return {}, bad
         # A name goes on a line of its own in the transcript: it can't add lines.
-        clean = re.sub(r"[\x00-\x1f\x7f\u200e\u200f\u2028-\u202e\u2066-\u2069]+", " ", name).strip()[:60]
+        clean = re.sub(r"[\x00-\x1f\x7f\u200e\u200f\u061c\u2028-\u202e\u2066-\u2069]+", " ", name).strip()[:60]
         clean = clean.encode("utf-8", "replace").decode("utf-8")
         if not clean or clean in samples:
             return {}, bad
@@ -229,7 +229,7 @@ def _read_times(raw: Any) -> tuple[dict[str, list[tuple[float, float]]], str | N
         if not isinstance(name, str):
             return {}, bad
         items = value if isinstance(value, list) else str(value).replace(";", ",").split(",")
-        clean = re.sub(r"[\x00-\x1f\x7f\u200e\u200f\u2028-\u202e\u2066-\u2069]+", " ", name).strip()[:60]
+        clean = re.sub(r"[\x00-\x1f\x7f\u200e\u200f\u061c\u2028-\u202e\u2066-\u2069]+", " ", name).strip()[:60]
         clean = clean.encode("utf-8", "replace").decode("utf-8")
         if not clean or clean in times:
             return {}, bad

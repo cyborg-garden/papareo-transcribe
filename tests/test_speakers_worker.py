@@ -223,3 +223,18 @@ def test_a_short_recording_is_not_split_into_many(seconds):
 def test_one_person_alone_stays_one_person(seconds):
     found, _ = run([(4, 0)] * (seconds // 4), voices(1))
     assert len({t["speaker"] for t in found["turns"]}) == 1
+
+
+def test_a_name_is_never_both_named_and_unmatched(tmp_path):
+    import wave
+
+    clip = tmp_path / "a.wav"
+    with wave.open(str(clip), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes((np.full(4 * RATE, 1, dtype=np.int16)).tobytes())
+    found, _ = run(CONVERSATION, voices(3), anchors={"A": [[10_000, 10_005]]}, samples={"A": str(clip), "B": str(clip)})
+    named = set(found["names"].values())
+    assert not named & set(found["unmatched"])
+    assert len(found["unmatched"]) == len(set(found["unmatched"]))

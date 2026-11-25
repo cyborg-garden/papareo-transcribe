@@ -413,6 +413,9 @@ def separate(request: dict, audio: np.ndarray, segment, extractor) -> dict:
         more, left = name_speakers({n: v for n, v in clips.items() if n not in anchor_group}, voices, taken)
         names.update(more)
         unmatched += left
+    # One entry per name, and never both named and unmatched.
+    named = set(names.values())
+    unmatched = [n for n in dict.fromkeys(unmatched) if n not in named]
     return {"turns": turns, "names": names, "unmatched": unmatched, "voices": voices}
 
 

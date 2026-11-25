@@ -417,7 +417,7 @@ def _separate(job: Job, env: Env) -> None:
     taken = set(names.values())
     job.turns = turns
     job.names = names
-    job.unmatched = [name for name in [*env.samples, *job.times] if name not in taken]
+    job.unmatched = [name for name in dict.fromkeys([*env.samples, *job.times]) if name not in taken]
     save(job)
 
 

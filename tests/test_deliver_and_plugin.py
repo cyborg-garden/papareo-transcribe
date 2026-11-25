@@ -248,3 +248,7 @@ def test_names_lose_invisible_direction_marks(plugin):
     times, _ = plugin._read_times({"Mo‮ana": "1:00"})
     samples, _ = plugin._read_samples({"Ar⁦oha": "/a.ogg"})
     assert list(times) == ["Mo ana"] and list(samples) == ["Ar oha"]
+
+
+def test_arabic_letter_mark_is_dropped_from_names(plugin):
+    assert list(plugin._read_times({"Mo؜ana": "1:00"})[0]) == ["Mo ana"]
