@@ -9,7 +9,9 @@ HOME_DIR="${PAPAREO_SPEAKERS_HOME:-/opt/data/papareo-speakers}"
 BASE=https://github.com/k2-fsa/sherpa-onnx/releases/download
 SEG_TAR_SHA=24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488
 SEG_SHA=220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079
-EMB_SHA=aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2
+# Voice model, re-uploaded upstream 2026-11-19 (k2-fsa/sherpa-onnx#4237): same
+# weights, pooling fixed so a voice's fingerprint no longer shifts with clip length.
+EMB_SHA=53cab20ba8f2eb2f6e2d89ecc18e88ef3222169b61b4419cbc13666744a4574b
 
 UV=$(command -v uv || ls /opt/hermes/tools/uv-*/uv 2>/dev/null | head -n 1 || true)
 [ -n "$UV" ] || { echo "install_speakers.sh needs uv, and couldn't find it" >&2; exit 1; }
